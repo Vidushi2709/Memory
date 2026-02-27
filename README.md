@@ -34,9 +34,7 @@ Memory/
     ├── embedding_generation.py   ← Embeds text → float vectors
     ├── extract_memory.py         ← LLM extracts structured memories from conversation
     ├── memory_store.py           ← ChromaDB read/write operations
-    ├── update_memory.py          ← ReAct agent: add/update/delete memories
-    └── responser.py              ← Alternative CLI chatbot (simpler, no rich UI)
-```
+    ├── update_memory.py          ← ReAct agent: add/update/delete memories```
 
 ---
 
