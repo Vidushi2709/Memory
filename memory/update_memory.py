@@ -5,7 +5,7 @@ from memory.embedding_generation import generate_embeddings
 from memory.memory_store import (
     EmbeddedMemory,
     RetrievedMemory,
-    delete_records,
+    mark_memory_old,
     fetch_all_user_records,
     add_memory,
     search_memories,
@@ -34,8 +34,11 @@ class UpdateMemorySignature(dspy.Signature):
 
     Actions meaning:
     - ADD: add new memories into the database as a new memory
-    - UPDATE: update an existing memory with richer information.
-    - DELETE: remove memory items from the database that aren't required anymore due to new information
+    - UPDATE: mark an existing memory as old, then add a new richer memory to replace it.
+              The old memory is preserved in history (not deleted), so the user can still
+              ask questions like "where did I live before?".
+    - SUPERSEDE: mark a memory as old/outdated without adding a replacement (e.g. the
+                 information is simply no longer relevant).
     - NOOP: No need to take any action
 
     If no action is required you can finish.
@@ -79,12 +82,14 @@ async def update_memory_agent(
         return f"Memory added: {memory_text}"
 
     async def update_existing_memory(memory_id: int, update_memory_text: str, categories: list[str]) -> str:
-        """Replace an existing memory (identified by its list index) with richer text."""
+        """Replace an existing memory (identified by its list index) with richer text.
+        The old memory is marked as superseded (preserved in history) and a new one is added."""
         print("updating memory:", update_memory_text)
         print("categories:", categories)
 
         point_id = get_point_id(memory_id)
-        await delete_records([point_id])
+        # Mark the old memory as superseded (soft-delete) — NOT hard-deleted
+        await mark_memory_old(point_id)
 
         embeddings = await generate_embeddings([update_memory_text])
         await add_memory(
@@ -96,18 +101,21 @@ async def update_memory_agent(
                     categories=categories,
                     embedding=embeddings[0],
                     date=datetime.now().isoformat(),
+                    is_current=1,
                 )
             ]
         )
         return f"Memory updated: {update_memory_text}"
 
-    async def delete_memory(memory_id: int) -> str:
-        """Delete an existing memory by its list index."""
-        print("deleting memory:", memory_id)
+    async def supersede_memory(memory_id: int) -> str:
+        """Mark an existing memory as old/superseded without adding a replacement.
+        The record is preserved in history (not deleted) so historical questions
+        like 'where did I live before?' can still be answered."""
+        print("superseding memory:", memory_id)
 
         point_id = get_point_id(memory_id)
-        await delete_records([point_id])
-        return f"Memory deleted: {memory_id}"
+        await mark_memory_old(point_id)
+        return f"Memory superseded (marked old): {memory_id}"
 
     async def noop() -> str:
         """No operation needed — nothing to add, update, or delete."""
@@ -126,7 +134,7 @@ async def update_memory_agent(
 
     memory_update = dspy.ReAct(
         signature=UpdateMemorySignature,
-        tools=[add_new_memory, update_existing_memory, delete_memory, noop],
+        tools=[add_new_memory, update_existing_memory, supersede_memory, noop],
     )
     with dspy.context(
         lm=dspy.LM(

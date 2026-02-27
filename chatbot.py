@@ -65,9 +65,17 @@ class ChatSignature(dspy.Signature):
     Use the retrieved memories naturally — don't just recite them.
     If the memories are empty or irrelevant, just respond normally.
     Be warm, concise, and conversational.
+
+    IMPORTANT — Memory versioning:
+    Memories can be marked [OLD/SUPERSEDED] when they were true in the past
+    but have since been replaced by newer information. When answering a
+    question like "where did I live before?" or "what was my old job?",
+    look for [OLD/SUPERSEDED] memories to answer the historical part, and
+    use the most recent (non-old) memory for the current state.
+    Always make it clear to the user which information is current vs. past.
     """
     transcript: list[dict] = dspy.InputField(desc="Recent conversation turns (last ~10 messages)")
-    retrieved_memories: list[str] = dspy.InputField(desc="Relevant past memories about this user")
+    retrieved_memories: list[str] = dspy.InputField(desc="Relevant past memories about this user (may include old/superseded ones)")
     question: str = dspy.InputField(desc="The user's latest message")
     response: str = dspy.OutputField(desc="Your reply to the user")
     save_memory: bool = dspy.OutputField(
@@ -91,6 +99,19 @@ class SessionSummarySignature(dspy.Signature):
 
 _responder = dspy.Predict(ChatSignature)
 _summariser = dspy.Predict(SessionSummarySignature)
+
+# Historical-query detection keywords
+_HISTORICAL_KEYWORDS = [
+    "before", "previously", "used to", "old", "past", "prior", "earlier",
+    "last time", "back then", "formerly", "previous", "history", "what was",
+    "where did i", "who did i", "when did i", "what did i",
+]
+
+
+def _is_historical_query(text: str) -> bool:
+    """Return True if the user's message looks like a question about their past."""
+    lower = text.lower()
+    return any(kw in lower for kw in _HISTORICAL_KEYWORDS)
 
 # Console 
 
@@ -140,16 +161,27 @@ async def show_memories(user_id: int):
     table.add_column("#", style="dim", width=4)
     table.add_column("Memory", style="white")
     table.add_column("Categories", style="magenta")
-    table.add_column("Date", style="dim", width=20)
+    table.add_column("Status", width=10)
+    table.add_column("Saved At", style="dim", width=20)
+    current_count = 0
     for i, r in enumerate(records, 1):
+        if r.is_current:
+            status = "[bold green]Current[/bold green]"
+            current_count += 1
+        else:
+            status = "[dim]Old[/dim]"
         table.add_row(
             str(i),
             r.memory_text,
             ", ".join(r.categories),
+            status,
             r.date[:19].replace("T", " "),
         )
     console.print(table)
-    console.print(f"[dim]  {len(records)} total memory/memories.[/dim]")
+    old_count = len(records) - current_count
+    console.print(
+        f"[dim]  {current_count} current  |  {old_count} old/superseded  |  {len(records)} total.[/dim]"
+    )
 
 
 async def show_categories(user_id: int):
@@ -317,11 +349,14 @@ async def chat_loop(user_id: int):
             continue
 
         # retrieve relevant memories
+        # For historical questions, also include old/superseded memories
+        historical = _is_historical_query(user_input)
         with console.status("[dim]Thinking…[/dim]", spinner="dots"):
             search_vec = (await generate_embeddings([user_input]))[0]
             retrieved = await search_memories(
                 search_vector=search_vec,
                 user_id=user_id,
+                include_old=historical,
             )
             retrieved_strings = [stringify_retrieved_point(m) for m in retrieved]
 

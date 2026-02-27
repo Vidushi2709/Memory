@@ -25,6 +25,7 @@ class EmbeddedMemory(BaseModel):
     categories: List[str]
     embedding: List[float]
     date: str
+    is_current: int = 1  # 1 = current/active, 0 = superseded/old
 
 
 class RetrievedMemory(BaseModel):
@@ -34,6 +35,7 @@ class RetrievedMemory(BaseModel):
     categories: list[str]
     date: str
     score: float
+    is_current: int = 1  # 1 = current/active, 0 = superseded/old
 
 
 # collection setup 
@@ -49,6 +51,7 @@ async def create_collection():
 async def add_memory(embedded_memories: List[EmbeddedMemory]):
     def _add():
         col = _get_collection()
+        now = datetime.now()
         col.upsert(
             ids=[uuid4().hex for _ in embedded_memories],
             embeddings=[m.embedding for m in embedded_memories],
@@ -58,6 +61,9 @@ async def add_memory(embedded_memories: List[EmbeddedMemory]):
                     "memory_text": m.memory_text,
                     "categories":  ",".join(m.categories),  # ChromaDB metadata values must be str/int/float
                     "date":        m.date,
+                    "timestamp":   datetime.fromisoformat(m.date).timestamp(),
+                    "saved_at":    now.isoformat(),           # wall-clock time memory was written
+                    "is_current":  m.is_current,             # 1=active, 0=superseded
                 }
                 for m in embedded_memories
             ],
@@ -80,6 +86,32 @@ async def delete_records(point_ids: List[str]):
     await asyncio.to_thread(_delete)
 
 
+async def mark_memory_old(point_id: str):
+    """
+    Mark an existing memory as superseded (is_current=0) without deleting it.
+    This preserves history so questions like "where did I live before?" can
+    still be answered by searching with include_old=True.
+    """
+    def _mark():
+        col = _get_collection()
+        # Fetch the existing record so we can re-upsert with updated metadata
+        result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
+        if not result["ids"]:
+            return  # already gone
+        meta = result["metadatas"][0]
+        embedding = result["embeddings"][0]
+        document = result["documents"][0]
+        meta["is_current"] = 0
+        meta["superseded_at"] = datetime.now().isoformat()
+        col.upsert(
+            ids=[point_id],
+            embeddings=[embedding],
+            metadatas=[meta],
+            documents=[document],
+        )
+    await asyncio.to_thread(_mark)
+
+
 # read operations 
 
 def _build_retrieved(id_, metadata, score) -> RetrievedMemory:
@@ -90,6 +122,7 @@ def _build_retrieved(id_, metadata, score) -> RetrievedMemory:
         categories=metadata["categories"].split(","),
         date=metadata["date"],
         score=score,
+        is_current=int(metadata.get("is_current", 1)),
     )
 
 
@@ -98,16 +131,22 @@ async def search_memories(
     user_id: int,
     categories: Optional[List[str]] = None,
     top_k: int = 5,
+    include_old: bool = False,
 ) -> List[RetrievedMemory]:
     """
     Semantic search over a user's memories.
+
+    Args:
+        include_old: If True, also search superseded (old) memories. Use this
+                     when the user asks historical questions like
+                     "where did I live before?".
 
     NOTE: ChromaDB 1.4.x metadata filters only support
     $eq / $ne / $gt / $gte / $lt / $lte / $in / $nin.
     `$contains` is NOT supported for metadata fields.
 
     We therefore filter by `user_id` (supported) and apply
-    the optional `categories` check client-side after retrieval.
+    the optional `categories` / `is_current` checks client-side.
     """
     def _search():
         col = _get_collection()
@@ -116,8 +155,8 @@ async def search_memories(
         where: dict = {"user_id": {"$eq": user_id}}
 
         # Retrieve more results than we need so the client-side
-        # category filter still has enough candidates to choose from.
-        fetch_k = max(top_k * 4, 20) if categories else top_k
+        # category / is_current filters still have enough candidates.
+        fetch_k = max(top_k * 6, 30) if (categories or not include_old) else max(top_k * 4, 20)
 
         try:
             results = col.query(
@@ -143,6 +182,10 @@ async def search_memories(
             # Convert to similarity score in [0, 1]
             score = 1.0 - (dist / 2.0)
             if score < 0.5:
+                continue
+
+            # Skip old/superseded memories unless explicitly requested
+            if not include_old and int(meta.get("is_current", 1)) == 0:
                 continue
 
             # Client-side category filter
@@ -192,9 +235,12 @@ async def get_all_categories(user_id: int) -> List[str]:
 # display helper 
 
 def stringify_retrieved_point(retrieved_memory: RetrievedMemory) -> str:
+    status_tag = "" if retrieved_memory.is_current else " [OLD/SUPERSEDED]"
+    saved = retrieved_memory.date[:19].replace("T", " ") if retrieved_memory.date else "unknown"
     return (
-        f"{retrieved_memory.memory_text} "
+        f"{retrieved_memory.memory_text}{status_tag} "
         f"(Categories: {retrieved_memory.categories}) "
+        f"[Saved: {saved}] "
         f"Relevance: {retrieved_memory.score:.2f}"
     )
 
