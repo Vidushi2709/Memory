@@ -63,9 +63,6 @@ async def update_memory_agent(
 
     async def add_new_memory(memory_text: str, categories: list[str]) -> str:
         """Add a brand-new memory to the database."""
-        print("adding memory:", memory_text)
-        print("categories:", categories)
-
         embeddings = await generate_embeddings([memory_text])
         await add_memory(
             embedded_memories=[
@@ -84,9 +81,6 @@ async def update_memory_agent(
     async def update_existing_memory(memory_id: int, update_memory_text: str, categories: list[str]) -> str:
         """Replace an existing memory (identified by its list index) with richer text.
         The old memory is marked as superseded (preserved in history) and a new one is added."""
-        print("updating memory:", update_memory_text)
-        print("categories:", categories)
-
         point_id = get_point_id(memory_id)
         # Mark the old memory as superseded (soft-delete) — NOT hard-deleted
         await mark_memory_old(point_id)
@@ -111,7 +105,6 @@ async def update_memory_agent(
         """Mark an existing memory as old/superseded without adding a replacement.
         The record is preserved in history (not deleted) so historical questions
         like 'where did I live before?' can still be answered."""
-        print("superseding memory:", memory_id)
 
         point_id = get_point_id(memory_id)
         await mark_memory_old(point_id)
@@ -119,7 +112,6 @@ async def update_memory_agent(
 
     async def noop() -> str:
         """No operation needed — nothing to add, update, or delete."""
-        print("no operation needed")
         return "No operation needed"
 
     # Build the MemoryWithIds list that the LLM will reason about

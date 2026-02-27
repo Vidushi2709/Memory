@@ -10,9 +10,7 @@ async def generate_embeddings(strings: List[str]) -> List[List[float]]:
     
     Returns a list of plain Python float lists (ChromaDB-compatible).
     """
-    print(strings)
     embeddings = await asyncio.to_thread(_model.encode, strings)
-    print(embeddings.shape)
     return [emb.tolist() for emb in embeddings]
 
 

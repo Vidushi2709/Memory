@@ -58,21 +58,13 @@ _lm = dspy.LM(
 
 class ChatSignature(dspy.Signature):
     """
-    You are a helpful, friendly AI assistant with long-term memory.
-    You are given the recent conversation transcript and relevant memories
-    retrieved from the user's personal memory store.
+    You are a friendly AI assistant with long-term memory about the user.
+    Use retrieved memories naturally in your replies — don't list or recite them.
+    Keep responses concise and conversational. Avoid unnecessary preamble.
 
-    Use the retrieved memories naturally — don't just recite them.
-    If the memories are empty or irrelevant, just respond normally.
-    Be warm, concise, and conversational.
-
-    IMPORTANT — Memory versioning:
-    Memories can be marked [OLD/SUPERSEDED] when they were true in the past
-    but have since been replaced by newer information. When answering a
-    question like "where did I live before?" or "what was my old job?",
-    look for [OLD/SUPERSEDED] memories to answer the historical part, and
-    use the most recent (non-old) memory for the current state.
-    Always make it clear to the user which information is current vs. past.
+    Memories can be marked [OLD/SUPERSEDED] for past states. Use these to answer
+    historical questions ("where did I live before?") while using current memories
+    for present-state questions. Be clear about what's current vs. past when relevant.
     """
     transcript: list[dict] = dspy.InputField(desc="Recent conversation turns (last ~10 messages)")
     retrieved_memories: list[str] = dspy.InputField(desc="Relevant past memories about this user (may include old/superseded ones)")
@@ -218,8 +210,7 @@ def fire_and_forget_memory(user_id: int, messages: list[dict]):
     async def _run():
         try:
             summary = await update_memories(user_id=user_id, messages=messages)
-            # Print softly so it doesn't interrupt the current prompt
-            console.print(f"\n[dim]  ✦ Memory updated in background: {summary}[/dim]")
+            console.print(f"\n[dim]  ✦ Memory updated: {summary}[/dim]")
         except Exception as e:
             console.print(f"\n[dim red]  Memory update failed: {e}[/dim red]")
 
@@ -388,13 +379,6 @@ async def chat_loop(user_id: int):
             border_style="green",
             padding=(0, 2),
         ))
-
-        if retrieved_strings:
-            console.print(
-                "[dim]  Recalled: "
-                + " | ".join(r.split("(")[0].strip() for r in retrieved_strings[:3])
-                + "[/dim]"
-            )
 
         console.print()
 
