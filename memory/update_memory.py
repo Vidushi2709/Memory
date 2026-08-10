@@ -88,7 +88,7 @@ def _safe_date(raw: str) -> str:
         return datetime.now().isoformat()
 
 
-async def _store(user_id: int, text: str, categories: list[str], importance: int, date: str):
+async def _store(user_id: int, text: str, categories: list[str], importance: int, date: str, session_id: str = ""):
     embeddings = await generate_embeddings([text])
     await add_memory(
         embedded_memories=[
@@ -100,14 +100,20 @@ async def _store(user_id: int, text: str, categories: list[str], importance: int
                 embedding=embeddings[0],
                 date=date,
                 importance=importance,
+                session_id=session_id,
             )
         ]
     )
 
 
-async def _apply_fact(user_id: int, fact: Memory) -> str:
+async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
     embedding = (await generate_embeddings([fact.information]))[0]
-    neighbors = await search_memories(search_vector=embedding, user_id=user_id, top_k=10)
+    neighbors = await search_memories(
+        search_vector=embedding,
+        user_id=user_id,
+        query_text=fact.information,
+        top_k=10,
+    )
 
     similar = [
         MemoryWithIds(
@@ -123,7 +129,7 @@ async def _apply_fact(user_id: int, fact: Memory) -> str:
             out = await _decide_action.acall(fact=fact.information, similar_memories=similar)
     except Exception:
         # LLM/parse failure — storing the fact as-is beats losing it
-        await _store(user_id, fact.information, fact.predicted_category, fact.importance, _safe_date(fact.date))
+        await _store(user_id, fact.information, fact.predicted_category, fact.importance, _safe_date(fact.date), session_id)
         return "added"
 
     if out.action == "NOOP":
@@ -133,7 +139,7 @@ async def _apply_fact(user_id: int, fact: Memory) -> str:
     date = _safe_date(fact.date)
 
     if out.action == "ADD":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
         return "added"
 
     try:
@@ -143,13 +149,13 @@ async def _apply_fact(user_id: int, fact: Memory) -> str:
 
     if not (0 <= target < len(neighbors)):
         # LLM pointed at a nonexistent memory — fall back to a plain add
-        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
         return "added"
 
     await mark_memory_old(neighbors[target].point_id)
 
     if out.action == "UPDATE":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
         return "updated"
 
     return "superseded"
@@ -166,14 +172,14 @@ async def _refresh_core_memory(user_id: int, facts: list[str]):
         await set_core_memory(user_id, new_core, embedding)
 
 
-async def update_memories(user_id: int, messages: list[dict]):
+async def update_memories(user_id: int, messages: list[dict], session_id: str = ""):
     categories = await get_all_categories(user_id=user_id)
     extracted = await extract_memory(messages, categories)
 
     if extracted.no_info or not extracted.new_memories:
         return "No new facts."
 
-    results = [await _apply_fact(user_id, fact) for fact in extracted.new_memories]
+    results = [await _apply_fact(user_id, fact, session_id) for fact in extracted.new_memories]
     await _refresh_core_memory(user_id, [f.information for f in extracted.new_memories])
 
     counts = Counter(results)
