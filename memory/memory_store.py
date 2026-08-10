@@ -6,6 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 from rank_bm25 import BM25Okapi
 import chromadb
+import networkx as nx
 import asyncio
 
 COLLECTION_NAME = "memories_bring_back_memories"
@@ -15,6 +16,9 @@ STRENGTH_INIT = 5.0        # initial Ebbinghaus strength, in days of decay scale
 STRENGTH_PER_RECALL = 1.0  # strength gained each time a memory is retrieved
 RRF_K = 60                 # reciprocal rank fusion constant
 RELEVANCE_FLOOR = 0.3      # min cosine similarity to enter the vector ranking
+LINK_EXPANSION_CAP = 3     # linked memories pulled in alongside search hits
+PPR_SEEDS = 8              # top fused hits used to seed Personalized PageRank
+USE_PPR = True             # PageRank ranking in the fusion (eval --no-ppr disables)
 
 _chroma = chromadb.PersistentClient(path="./chroma_db")  # persists to disk across sessions
 
@@ -38,6 +42,8 @@ class EmbeddedMemory(BaseModel):
     strength: float = STRENGTH_INIT
     session_id: str = ""
     kind: str = "fact"  # fact | summary | insight
+    keywords: List[str] = []
+    context: str = ""
 
 
 class RetrievedMemory(BaseModel):
@@ -51,6 +57,9 @@ class RetrievedMemory(BaseModel):
     importance: int = 5
     session_id: str = ""
     kind: str = "fact"
+    context: str = ""
+    links: list[str] = []
+    linked: bool = False  # True if pulled in via link expansion, not ranked search
 
 
 # collection setup 
@@ -63,12 +72,13 @@ async def create_collection():
 
 # write operations 
 
-async def add_memory(embedded_memories: List[EmbeddedMemory]):
+async def add_memory(embedded_memories: List[EmbeddedMemory]) -> List[str]:
     def _add():
         col = _get_collection()
         now = datetime.now()
+        ids = [uuid4().hex for _ in embedded_memories]
         col.upsert(
-            ids=[uuid4().hex for _ in embedded_memories],
+            ids=ids,
             embeddings=[m.embedding for m in embedded_memories],
             metadatas=[
                 {
@@ -84,12 +94,16 @@ async def add_memory(embedded_memories: List[EmbeddedMemory]):
                     "strength":    m.strength,
                     "session_id":  m.session_id,
                     "kind":        m.kind,
+                    "keywords":    ",".join(m.keywords),
+                    "context":     m.context,
+                    "links":       "",                       # comma-separated point ids
                 }
                 for m in embedded_memories
             ],
             documents=[m.memory_text for m in embedded_memories],
         )
-    await asyncio.to_thread(_add)
+        return ids
+    return await asyncio.to_thread(_add)
 
 
 async def delete_user_records(user_id: int):
@@ -106,30 +120,53 @@ async def delete_records(point_ids: List[str]):
     await asyncio.to_thread(_delete)
 
 
+def _update_meta_sync(point_id: str, updates: dict):
+    """Re-upsert a record with modified metadata (ChromaDB has no partial update)."""
+    col = _get_collection()
+    result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
+    if not result["ids"]:
+        return  # already gone
+    meta = result["metadatas"][0]
+    meta.update(updates)
+    col.upsert(
+        ids=[point_id],
+        embeddings=[result["embeddings"][0]],
+        metadatas=[meta],
+        documents=[result["documents"][0]],
+    )
+
+
 async def mark_memory_old(point_id: str):
     """
     Mark an existing memory as superseded (is_current=0) without deleting it.
     This preserves history so questions like "where did I live before?" can
     still be answered by searching with include_old=True.
     """
-    def _mark():
+    await asyncio.to_thread(
+        _update_meta_sync, point_id,
+        {"is_current": 0, "superseded_at": datetime.now().isoformat()},
+    )
+
+
+async def add_links(point_id: str, linked_ids: List[str]):
+    """Record bidirectional links between a memory and related memories (A-Mem)."""
+    def _link():
         col = _get_collection()
-        # Fetch the existing record so we can re-upsert with updated metadata
-        result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
-        if not result["ids"]:
-            return  # already gone
-        meta = result["metadatas"][0]
-        embedding = result["embeddings"][0]
-        document = result["documents"][0]
-        meta["is_current"] = 0
-        meta["superseded_at"] = datetime.now().isoformat()
-        col.upsert(
-            ids=[point_id],
-            embeddings=[embedding],
-            metadatas=[meta],
-            documents=[document],
-        )
-    await asyncio.to_thread(_mark)
+        for a, b in [(point_id, lid) for lid in linked_ids if lid != point_id]:
+            for src, dst in ((a, b), (b, a)):
+                result = col.get(ids=[src], include=["metadatas"])
+                if not result["ids"]:
+                    continue
+                existing = set(filter(None, result["metadatas"][0].get("links", "").split(",")))
+                if dst not in existing:
+                    existing.add(dst)
+                    _update_meta_sync(src, {"links": ",".join(sorted(existing))})
+    await asyncio.to_thread(_link)
+
+
+async def set_context(point_id: str, context: str):
+    """Rewrite a memory's context description (A-Mem memory evolution)."""
+    await asyncio.to_thread(_update_meta_sync, point_id, {"context": context})
 
 
 # read operations 
@@ -145,7 +182,7 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def _build_retrieved(id_, metadata, score) -> RetrievedMemory:
+def _build_retrieved(id_, metadata, score, linked=False) -> RetrievedMemory:
     return RetrievedMemory(
         point_id=id_,
         user_id=metadata["user_id"],
@@ -157,6 +194,9 @@ def _build_retrieved(id_, metadata, score) -> RetrievedMemory:
         importance=int(metadata.get("importance", 5)),
         session_id=metadata.get("session_id", ""),
         kind=kind_of(metadata),
+        context=metadata.get("context", ""),
+        links=list(filter(None, metadata.get("links", "").split(","))),
+        linked=linked,
     )
 
 
@@ -231,18 +271,42 @@ async def search_memories(
         except Exception:
             pass
 
-        # BM25 keyword ranking
+        # BM25 keyword ranking over enriched note text (content + keywords + context)
         bm25_rank = []
         if query_text:
             ids = list(eligible)
-            bm25 = BM25Okapi([_tokenize(eligible[i][1]) for i in ids])
+            enriched = [
+                eligible[i][1] + " "
+                + eligible[i][0].get("keywords", "").replace(",", " ") + " "
+                + eligible[i][0].get("context", "")
+                for i in ids
+            ]
+            bm25 = BM25Okapi([_tokenize(t) for t in enriched])
             scores = bm25.get_scores(_tokenize(query_text))
             ranked = sorted(zip(ids, scores), key=lambda x: x[1], reverse=True)
             bm25_rank = [i for i, s in ranked if s > 0][:fetch_k]
 
-        # Reciprocal rank fusion across the two rankings
+        # Personalized PageRank over the link graph, seeded by the direct hits —
+        # surfaces memories connected to what matched, even if they didn't match
+        ppr_rank = []
+        seeds = list(dict.fromkeys(vec_rank + bm25_rank))[:PPR_SEEDS] if USE_PPR else []
+        graph = nx.Graph()
+        for id_, (meta, _) in eligible.items():
+            for target in filter(None, meta.get("links", "").split(",")):
+                if target in eligible:
+                    graph.add_edge(id_, target)
+        if seeds and graph.number_of_edges() > 0:
+            personalization = {n: (1.0 if n in seeds else 0.0) for n in graph.nodes}
+            if any(personalization.values()):
+                try:
+                    pr = nx.pagerank(graph, personalization=personalization)
+                    ppr_rank = [n for n, _ in sorted(pr.items(), key=lambda x: x[1], reverse=True)][:fetch_k]
+                except Exception:
+                    pass
+
+        # Reciprocal rank fusion across the three rankings
         rrf: dict = {}
-        for rank_list in (vec_rank, bm25_rank):
+        for rank_list in (vec_rank, bm25_rank, ppr_rank):
             for pos, id_ in enumerate(rank_list):
                 rrf[id_] = rrf.get(id_, 0.0) + 1.0 / (RRF_K + pos + 1)
         if not rrf:
@@ -276,7 +340,19 @@ async def search_memories(
                 documents=hit["documents"],
             )
 
-        return [_build_retrieved(id_, meta, score) for score, id_, meta in top]
+        out = [_build_retrieved(id_, meta, score) for score, id_, meta in top]
+
+        # 1-hop link expansion: bring along memories linked to the winners
+        top_ids = {id_ for _, id_, _ in top}
+        expansion = []
+        for _, _, meta in top:
+            for lid in filter(None, meta.get("links", "").split(",")):
+                if lid in eligible and lid not in top_ids and lid not in expansion:
+                    expansion.append(lid)
+        for lid in expansion[:LINK_EXPANSION_CAP]:
+            out.append(_build_retrieved(lid, eligible[lid][0], 0.0, linked=True))
+
+        return out
 
     return await asyncio.to_thread(_search)
 
@@ -360,12 +436,14 @@ async def get_all_categories(user_id: int) -> List[str]:
 
 def stringify_retrieved_point(retrieved_memory: RetrievedMemory) -> str:
     status_tag = "" if retrieved_memory.is_current else " [OLD/SUPERSEDED]"
+    linked_tag = " [LINKED]" if retrieved_memory.linked else ""
     saved = retrieved_memory.date[:19].replace("T", " ") if retrieved_memory.date else "unknown"
+    context = f" Context: {retrieved_memory.context}" if retrieved_memory.context else ""
     return (
-        f"{retrieved_memory.memory_text}{status_tag} "
+        f"{retrieved_memory.memory_text}{status_tag}{linked_tag} "
         f"(Categories: {retrieved_memory.categories}) "
         f"[Saved: {saved}] "
-        f"Score: {retrieved_memory.score:.2f}"
+        f"Score: {retrieved_memory.score:.2f}{context}"
     )
 
 

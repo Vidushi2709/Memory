@@ -15,6 +15,8 @@ class Memory(BaseModel):
     predicted_category: List[str]
     importance: int = 5  # 1 = mundane, 10 = life-changing
     date: str = ""  # ISO date the fact became true
+    keywords: List[str] = []  # salient tokens for keyword search
+    context: str = ""  # one-sentence LLM interpretation of what this fact means
 
     @field_validator("importance", mode="before")
     @classmethod
@@ -30,6 +32,16 @@ class Memory(BaseModel):
     def _coerce_date(cls, v):
         return v if isinstance(v, str) else ""
 
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _coerce_keywords(cls, v):
+        return v if isinstance(v, list) else []
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def _coerce_context(cls, v):
+        return v if isinstance(v, str) else ""
+
 
 class MemoryExtractor(dspy.Signature):
     """
@@ -43,6 +55,10 @@ class MemoryExtractor(dspy.Signature):
     user's identity or life). Resolve relative dates ("last week", "next month")
     against current_date and set each memory's date to the ISO date the fact became
     true; use current_date if unknown.
+
+    For each memory also produce: keywords — the 2-5 salient tokens someone would
+    search by (names, places, specific things); and context — one sentence saying
+    what this fact reveals about the user, grounded only in what was said.
 
     You will be given a list of existing memory categories that have already been stored
     for this user. You can decide whether to create a new category or to pick from an

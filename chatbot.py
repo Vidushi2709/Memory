@@ -28,7 +28,9 @@ from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
+from memory.consolidate import dedup_memories, evolve_memories, maybe_reflect
 from memory.embedding_generation import generate_embeddings
+from memory.transcripts import archive_exchange
 from memory.memory_store import (
     add_memory,
     create_collection,
@@ -91,8 +93,26 @@ class SessionSummarySignature(dspy.Signature):
     )
 
 
+COMPOSE_ON_READ = False  # experiment: replace the raw memory list with a query-tailored digest
+
+
+class ComposeMemorySignature(dspy.Signature):
+    """
+    Compose a brief memory digest tailored to the user's question. From the
+    retrieved memories, write 1-3 sentences containing only the information
+    relevant to answering the question, keeping current vs. past state clear
+    (memories marked [OLD/SUPERSEDED] are past). If nothing is relevant, output
+    "No relevant memories." Use ONLY the retrieved memories — never invent.
+    """
+
+    question: str = dspy.InputField()
+    memories: list[str] = dspy.InputField()
+    digest: str = dspy.OutputField()
+
+
 _responder = dspy.Predict(ChatSignature)
 _summariser = dspy.Predict(SessionSummarySignature)
+_composer = dspy.Predict(ComposeMemorySignature)
 
 # Console
 
@@ -109,10 +129,11 @@ BANNER = """
 
 HELP_TEXT = (
     "[bold cyan]/memories[/bold cyan]    — show all stored memories\n"
+    "[bold cyan]/sessions[/bold cyan]    — list past sessions with their summaries\n"
     "[bold cyan]/categories[/bold cyan]  — list all memory categories\n"
     "[bold cyan]/forget[/bold cyan]      — delete ALL your memories (irreversible)\n"
     "[bold cyan]/help[/bold cyan]        — show this help\n"
-    "[bold cyan]/quit[/bold cyan]        — save session summary & exit\n"
+    "[bold cyan]/quit[/bold cyan]        — save summary, consolidate memories & exit\n"
 )
 
 
@@ -168,6 +189,29 @@ async def show_memories(user_id: int):
     )
 
 
+async def show_sessions(user_id: int):
+    records = await fetch_all_user_records(user_id=user_id)
+    if not records:
+        console.print("[dim]No memories stored yet.[/dim]")
+        return
+    sessions: dict[str, list] = {}
+    for r in records:
+        sessions.setdefault(r.session_id or "(untagged)", []).append(r)
+    table = Table(box=box.ROUNDED, border_style="cyan", show_header=True, header_style="bold cyan")
+    table.add_column("Session", style="magenta", width=18)
+    table.add_column("Started", style="dim", width=12)
+    table.add_column("Memories", style="dim", width=8)
+    table.add_column("Summary", style="white")
+    for sid, group in sorted(sessions.items(), reverse=True):
+        summary = next((r.memory_text for r in group if r.kind == "summary"), "")
+        if not summary:
+            summary = group[0].memory_text
+        if len(summary) > 70:
+            summary = summary[:70] + "…"
+        table.add_row(sid, min(r.date for r in group)[:10], str(len(group)), summary)
+    console.print(table)
+
+
 async def show_categories(user_id: int):
     cats = await get_all_categories(user_id=user_id)
     if not cats:
@@ -193,7 +237,7 @@ async def handle_forget(user_id: int):
 _pending_memory_tasks: set[asyncio.Task] = set()
 
 
-def fire_and_forget_memory(user_id: int, messages: list[dict]):
+def fire_and_forget_memory(user_id: int, messages: list[dict], session_id: str):
     """
     Schedule update_memories as a background task so the chat loop
     returns the AI response immediately without waiting for the
@@ -201,8 +245,11 @@ def fire_and_forget_memory(user_id: int, messages: list[dict]):
     """
     async def _run():
         try:
-            summary = await update_memories(user_id=user_id, messages=messages)
+            summary = await update_memories(user_id=user_id, messages=messages, session_id=session_id)
             console.print(f"\n[dim]  ✦ Memory updated: {summary}[/dim]")
+            insights = await maybe_reflect(user_id, session_id)
+            if insights:
+                console.print(f"[dim]  ✦ Reflection: {len(insights)} new insight(s) stored.[/dim]")
         except Exception as e:
             console.print(f"\n[dim red]  Memory update failed: {e}[/dim red]")
 
@@ -241,7 +288,7 @@ async def proactive_recall(user_id: int):
     console.print()
 
 
-async def save_session_summary(user_id: int, past_messages: list[dict]):
+async def save_session_summary(user_id: int, past_messages: list[dict], session_id: str):
     """
     Ask the LLM to summarise the session, then store it as a memory
     so the AI knows what was discussed even across restarts.
@@ -270,6 +317,8 @@ async def save_session_summary(user_id: int, past_messages: list[dict]):
                         categories=["session_summary"],
                         embedding=embeddings[0],
                         date=datetime.now().isoformat(),
+                        session_id=session_id,
+                        kind="summary",
                     )
                 ]
             )
@@ -285,10 +334,33 @@ async def save_session_summary(user_id: int, past_messages: list[dict]):
             console.print(f"[dim red]  Could not save session summary: {e}[/dim red]")
 
 
+async def finish_session(user_id: int, past_messages: list[dict], session_id: str):
+    """
+    End-of-session housekeeping: wait for in-flight memory writes, save the
+    session summary, then run the dedup/consolidation pass over memories.
+    """
+    if _pending_memory_tasks:
+        console.print("[dim]  Waiting for background memory writes to finish…[/dim]")
+        await asyncio.gather(*_pending_memory_tasks, return_exceptions=True)
+
+    await save_session_summary(user_id, past_messages, session_id)
+
+    with console.status("[dim]Consolidating memories…[/dim]", spinner="dots"):
+        try:
+            result = await dedup_memories(user_id, session_id)
+            evolved = await evolve_memories(user_id, session_id)
+            if evolved:
+                result += f", {evolved} context(s) evolved"
+            console.print(f"[dim]  ✦ Consolidation: {result}.[/dim]")
+        except Exception as e:
+            console.print(f"[dim red]  Consolidation failed: {e}[/dim red]")
+
+
 # Core chat loop 
 
 async def chat_loop(user_id: int):
     past_messages: list[dict] = []
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     console.print(Rule(style="magenta"))
     console.print(
@@ -305,8 +377,8 @@ async def chat_loop(user_id: int):
             user_input = console.input("[bold cyan]You:[/bold cyan] ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Interrupted.[/dim]")
-            # Still save the session summary on Ctrl+C
-            await save_session_summary(user_id, past_messages)
+            # Still save the summary and consolidate on Ctrl+C
+            await finish_session(user_id, past_messages, session_id)
             break
 
         if not user_input:
@@ -316,11 +388,7 @@ async def chat_loop(user_id: int):
         cmd = user_input.lower()
 
         if cmd in ("/quit", "/exit", "/q"):
-            await save_session_summary(user_id, past_messages)
-            # Wait for any in-flight background memory tasks to finish
-            if _pending_memory_tasks:
-                console.print("[dim]  Waiting for background memory writes to finish…[/dim]")
-                await asyncio.gather(*_pending_memory_tasks, return_exceptions=True)
+            await finish_session(user_id, past_messages, session_id)
             console.print("[dim]Goodbye! Your memories are saved.[/dim]")
             break
 
@@ -329,6 +397,9 @@ async def chat_loop(user_id: int):
             continue
         if cmd == "/memories":
             await show_memories(user_id)
+            continue
+        if cmd == "/sessions":
+            await show_sessions(user_id)
             continue
         if cmd == "/categories":
             await show_categories(user_id)
@@ -343,10 +414,16 @@ async def chat_loop(user_id: int):
             retrieved = await search_memories(
                 search_vector=search_vec,
                 user_id=user_id,
+                query_text=user_input,
                 include_old=True,
             )
             retrieved_strings = [stringify_retrieved_point(m) for m in retrieved]
             core = await get_core_memory(user_id)
+
+            if COMPOSE_ON_READ and retrieved_strings:
+                with dspy.context(lm=_lm):
+                    composed = _composer(question=user_input, memories=retrieved_strings)
+                retrieved_strings = [composed.digest]
 
             # generate response
             with dspy.context(lm=_lm):
@@ -365,9 +442,11 @@ async def chat_loop(user_id: int):
             {"role": "user",      "content": user_input},
             {"role": "assistant", "content": response},
         ])
+        # raw experience bank — enables re-extraction when the pipeline improves
+        archive_exchange(user_id, session_id, user_input, response)
 
         if save:
-            fire_and_forget_memory(user_id=user_id, messages=list(past_messages[-6:]))
+            fire_and_forget_memory(user_id=user_id, messages=list(past_messages[-6:]), session_id=session_id)
 
         # print response
         console.print()

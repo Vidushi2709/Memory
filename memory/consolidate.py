@@ -9,6 +9,7 @@ from memory.memory_store import (
     fetch_user_records_raw,
     kind_of,
     mark_memory_old,
+    set_context,
 )
 import os
 from dotenv import load_dotenv
@@ -17,6 +18,8 @@ load_dotenv()
 
 DEDUP_SIMILARITY = 0.9     # cosine similarity above which memories count as duplicates
 REFLECTION_THRESHOLD = 40  # summed importance of fresh facts that triggers reflection
+EVOLVE_NEW_CAP = 3         # newest session memories considered for evolution
+EVOLVE_LINK_CAP = 2        # linked neighbors re-examined per new memory
 
 _lm = dspy.LM(
     model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
@@ -47,8 +50,25 @@ class ReflectionSignature(dspy.Signature):
     insights: list[str] = dspy.OutputField()
 
 
+class EvolveContextSignature(dspy.Signature):
+    """
+    Given a NEW memory about a user and one EXISTING related memory, decide
+    whether the existing memory's one-sentence context should be reinterpreted
+    in light of the new memory (e.g. "bought hiking boots" becomes trip
+    preparation once a trek is planned). Output the updated one-sentence
+    context, or an empty string if no change is needed. Use ONLY stated
+    information — never invent details.
+    """
+
+    new_memory: str = dspy.InputField()
+    existing_memory: str = dspy.InputField()
+    existing_context: str = dspy.InputField()
+    updated_context: str = dspy.OutputField()
+
+
 _merger = dspy.Predict(MergeMemoriesSignature)
 _reflector = dspy.Predict(ReflectionSignature)
+_evolver = dspy.Predict(EvolveContextSignature)
 
 
 def _cosine(a, b) -> float:
@@ -124,6 +144,43 @@ async def dedup_memories(user_id: int, session_id: str = "") -> str:
             merged_count += 1
 
     return f"merged {merged_count} duplicate group(s)" if merged_count else "no duplicates found"
+
+
+async def evolve_memories(user_id: int, session_id: str) -> int:
+    """
+    A-Mem memory evolution: this session's new memories may change how their
+    linked neighbors should be read — rewrite those neighbors' context lines.
+    """
+    recs = await fetch_user_records_raw(user_id)
+    by_id = dict(zip(recs["ids"], recs["metadatas"]))
+
+    new_metas = [
+        m for m in recs["metadatas"]
+        if m.get("session_id") == session_id and kind_of(m) == "fact"
+        and int(m.get("is_current", 1)) == 1 and m.get("links")
+    ]
+    new_metas.sort(key=lambda m: m.get("saved_at", ""), reverse=True)
+
+    changed = 0
+    for new_meta in new_metas[:EVOLVE_NEW_CAP]:
+        for lid in list(filter(None, new_meta.get("links", "").split(",")))[:EVOLVE_LINK_CAP]:
+            neighbor = by_id.get(lid)
+            if neighbor is None or int(neighbor.get("is_current", 1)) == 0:
+                continue
+            try:
+                with dspy.context(lm=_lm):
+                    out = await _evolver.acall(
+                        new_memory=new_meta["memory_text"],
+                        existing_memory=neighbor["memory_text"],
+                        existing_context=neighbor.get("context", ""),
+                    )
+                context = out.updated_context.strip()
+            except Exception:
+                continue
+            if context and context != neighbor.get("context", ""):
+                await set_context(lid, context)
+                changed += 1
+    return changed
 
 
 async def maybe_reflect(user_id: int, session_id: str = "") -> list[str]:

@@ -7,6 +7,7 @@ from memory.embedding_generation import generate_embeddings
 from memory.extract_memory import extract_memory, Memory
 from memory.memory_store import (
     EmbeddedMemory,
+    add_links,
     get_all_categories,
     get_core_memory,
     mark_memory_old,
@@ -60,6 +61,9 @@ class MemoryActionSignature(dspy.Signature):
     memory_text: str = dspy.OutputField(
         desc="Final text to store for ADD/UPDATE. Empty string otherwise."
     )
+    related_memory_ids: str = dspy.OutputField(
+        desc="Comma-separated indexes of memories genuinely related to this fact (shared topic, person, or activity). Empty if none."
+    )
 
 
 class CoreMemorySignature(dspy.Signature):
@@ -88,22 +92,25 @@ def _safe_date(raw: str) -> str:
         return datetime.now().isoformat()
 
 
-async def _store(user_id: int, text: str, categories: list[str], importance: int, date: str, session_id: str = ""):
+async def _store(user_id: int, text: str, fact: Memory, date: str, session_id: str = "") -> str:
     embeddings = await generate_embeddings([text])
-    await add_memory(
+    ids = await add_memory(
         embedded_memories=[
             EmbeddedMemory(
                 id="",
                 user_id=user_id,
                 memory_text=text,
-                categories=categories,
+                categories=fact.predicted_category,
                 embedding=embeddings[0],
                 date=date,
-                importance=importance,
+                importance=fact.importance,
                 session_id=session_id,
+                keywords=fact.keywords,
+                context=fact.context,
             )
         ]
     )
+    return ids[0]
 
 
 async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
@@ -129,8 +136,21 @@ async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
             out = await _decide_action.acall(fact=fact.information, similar_memories=similar)
     except Exception:
         # LLM/parse failure — storing the fact as-is beats losing it
-        await _store(user_id, fact.information, fact.predicted_category, fact.importance, _safe_date(fact.date), session_id)
+        await _store(user_id, fact.information, fact, _safe_date(fact.date), session_id)
         return "added"
+
+    async def _link_related(new_id: str):
+        # A-Mem linking: connect the new memory to neighbors the LLM called related
+        targets = []
+        for raw in (out.related_memory_ids or "").split(","):
+            try:
+                i = int(raw.strip())
+            except ValueError:
+                continue
+            if 0 <= i < len(neighbors):
+                targets.append(neighbors[i].point_id)
+        if targets:
+            await add_links(new_id, targets)
 
     if out.action == "NOOP":
         return "noop"
@@ -139,7 +159,8 @@ async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
     date = _safe_date(fact.date)
 
     if out.action == "ADD":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
+        new_id = await _store(user_id, text, fact, date, session_id)
+        await _link_related(new_id)
         return "added"
 
     try:
@@ -149,13 +170,15 @@ async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
 
     if not (0 <= target < len(neighbors)):
         # LLM pointed at a nonexistent memory — fall back to a plain add
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
+        new_id = await _store(user_id, text, fact, date, session_id)
+        await _link_related(new_id)
         return "added"
 
     await mark_memory_old(neighbors[target].point_id)
 
     if out.action == "UPDATE":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
+        new_id = await _store(user_id, text, fact, date, session_id)
+        await _link_related(new_id)
         return "updated"
 
     return "superseded"
