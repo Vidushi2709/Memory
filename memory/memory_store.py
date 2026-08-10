@@ -26,6 +26,7 @@ class EmbeddedMemory(BaseModel):
     embedding: List[float]
     date: str
     is_current: int = 1  # 1 = current/active, 0 = superseded/old
+    importance: int = 5  # 1 = mundane, 10 = life-changing
 
 
 class RetrievedMemory(BaseModel):
@@ -36,6 +37,7 @@ class RetrievedMemory(BaseModel):
     date: str
     score: float
     is_current: int = 1  # 1 = current/active, 0 = superseded/old
+    importance: int = 5
 
 
 # collection setup 
@@ -64,6 +66,8 @@ async def add_memory(embedded_memories: List[EmbeddedMemory]):
                     "timestamp":   datetime.fromisoformat(m.date).timestamp(),
                     "saved_at":    now.isoformat(),           # wall-clock time memory was written
                     "is_current":  m.is_current,             # 1=active, 0=superseded
+                    "importance":  m.importance,
+                    "last_accessed": now.timestamp(),        # epoch of last retrieval hit
                 }
                 for m in embedded_memories
             ],
@@ -123,6 +127,7 @@ def _build_retrieved(id_, metadata, score) -> RetrievedMemory:
         date=metadata["date"],
         score=score,
         is_current=int(metadata.get("is_current", 1)),
+        importance=int(metadata.get("importance", 5)),
     )
 
 
@@ -136,10 +141,12 @@ async def search_memories(
     """
     Semantic search over a user's memories.
 
+    Ranking follows the Generative Agents formula:
+        score = relevance (cosine sim) + recency (0.995^hours since last recall)
+              + importance (LLM-rated 1-10, scaled to [0,1])
+
     Args:
-        include_old: If True, also search superseded (old) memories. Use this
-                     when the user asks historical questions like
-                     "where did I live before?".
+        include_old: If True, also search superseded (old) memories.
 
     NOTE: ChromaDB 1.4.x metadata filters only support
     $eq / $ne / $gt / $gte / $lt / $lte / $in / $nin.
@@ -155,8 +162,8 @@ async def search_memories(
         where: dict = {"user_id": {"$eq": user_id}}
 
         # Retrieve more results than we need so the client-side
-        # category / is_current filters still have enough candidates.
-        fetch_k = max(top_k * 6, 30) if (categories or not include_old) else max(top_k * 4, 20)
+        # filters and re-ranking still have enough candidates.
+        fetch_k = max(top_k * 6, 30)
 
         try:
             results = col.query(
@@ -169,19 +176,23 @@ async def search_memories(
             # Collection might be empty — return empty list gracefully
             return []
 
-        out = []
         if not results["ids"] or not results["ids"][0]:
-            return out
+            return []
 
+        now = datetime.now().timestamp()
+        scored = []
         for id_, meta, dist in zip(
             results["ids"][0],
             results["metadatas"][0],
             results["distances"][0],
         ):
+            # Core profile record is injected into every prompt, not searched
+            if meta.get("type") == "core":
+                continue
+
             # ChromaDB cosine distance: 0 = identical, 2 = opposite
-            # Convert to similarity score in [0, 1]
-            score = 1.0 - (dist / 2.0)
-            if score < 0.5:
+            relevance = 1.0 - (dist / 2.0)
+            if relevance < 0.3:
                 continue
 
             # Skip old/superseded memories unless explicitly requested
@@ -194,13 +205,63 @@ async def search_memories(
                 if not any(c in stored_cats for c in categories):
                     continue
 
-            out.append(_build_retrieved(id_, meta, score))
-            if len(out) >= top_k:
-                break
+            last_accessed = float(meta.get("last_accessed", meta.get("timestamp", now)))
+            recency = 0.995 ** ((now - last_accessed) / 3600.0)
+            importance = int(meta.get("importance", 5)) / 10.0
 
-        return out
+            scored.append((relevance + recency + importance, id_, meta))
+
+        scored.sort(key=lambda s: s[0], reverse=True)
+        top = scored[:top_k]
+
+        # Touch last_accessed on the winners so recency reflects actual recall
+        if top:
+            hit = col.get(ids=[id_ for _, id_, _ in top],
+                          include=["metadatas", "embeddings", "documents"])
+            for meta in hit["metadatas"]:
+                meta["last_accessed"] = now
+            col.upsert(
+                ids=hit["ids"],
+                embeddings=hit["embeddings"],
+                metadatas=hit["metadatas"],
+                documents=hit["documents"],
+            )
+
+        return [_build_retrieved(id_, meta, score) for score, id_, meta in top]
 
     return await asyncio.to_thread(_search)
+
+
+# core memory (always-in-prompt user profile)
+
+async def get_core_memory(user_id: int) -> str:
+    def _get():
+        col = _get_collection()
+        result = col.get(ids=[f"core_{user_id}"], include=["documents"])
+        return result["documents"][0] if result["ids"] else ""
+    return await asyncio.to_thread(_get)
+
+
+async def set_core_memory(user_id: int, text: str, embedding: List[float]):
+    def _set():
+        col = _get_collection()
+        now = datetime.now()
+        col.upsert(
+            ids=[f"core_{user_id}"],
+            embeddings=[embedding],
+            metadatas=[{
+                "user_id":     user_id,
+                "type":        "core",
+                "memory_text": text,
+                "categories":  "core",
+                "date":        now.isoformat(),
+                "timestamp":   now.timestamp(),
+                "saved_at":    now.isoformat(),
+                "is_current":  1,
+            }],
+            documents=[text],
+        )
+    await asyncio.to_thread(_set)
 
 
 async def fetch_all_user_records(user_id: int) -> List[RetrievedMemory]:
@@ -213,6 +274,7 @@ async def fetch_all_user_records(user_id: int) -> List[RetrievedMemory]:
         return [
             _build_retrieved(id_, meta, 0.0)
             for id_, meta in zip(results["ids"], results["metadatas"])
+            if meta.get("type") != "core"
         ]
     return await asyncio.to_thread(_fetch)
 
@@ -226,6 +288,8 @@ async def get_all_categories(user_id: int) -> List[str]:
         )
         seen = set()
         for meta in results["metadatas"]:
+            if meta.get("type") == "core":
+                continue
             for cat in meta["categories"].split(","):
                 seen.add(cat.strip())
         return sorted(seen)
@@ -241,7 +305,7 @@ def stringify_retrieved_point(retrieved_memory: RetrievedMemory) -> str:
         f"{retrieved_memory.memory_text}{status_tag} "
         f"(Categories: {retrieved_memory.categories}) "
         f"[Saved: {saved}] "
-        f"Relevance: {retrieved_memory.score:.2f}"
+        f"Score: {retrieved_memory.score:.2f}"
     )
 
 
