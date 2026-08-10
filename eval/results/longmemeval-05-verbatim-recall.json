@@ -1,0 +1,86 @@
+[
+  {
+    "question_id": "031748ae",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+    "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
+    "answer": "When you just started your new role as Senior Software Engineer, you led a team of 4 engineers. Now, you lead a team of 5 engineers.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "031748ae_abs",
+    "question_type": "knowledge-update",
+    "is_abstention": true,
+    "question": "How many engineers do I lead when I just started my new role as Software Engineer Manager?",
+    "expected": "The information provided is not enough. You mentioned starting the role as Senior Software Engineer but not Software Engineer Manager.",
+    "answer": "From my records, you initially led a team of 4 engineers when you started your role as Senior Software Engineer. However, you later mentioned that you now lead a team of 5 engineers. So, when you just started, it was 4 engineers.",
+    "correct": false,
+    "store_has_answer": null,
+    "retrieval_has_answer": null,
+    "loss_stage": "n/a (abstention)"
+  },
+  {
+    "question_id": "0862e8bf",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "What is the name of my cat?",
+    "expected": "Luna",
+    "answer": "Your cat's name is Luna.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "0862e8bf_abs",
+    "question_type": "single-session-user",
+    "is_abstention": true,
+    "question": "What is the name of my hamster?",
+    "expected": "You did not mention this information. You mentioned your cat Luna but not your hamster.",
+    "answer": "I don't have any information about a hamster. I do know that you have a cat named Luna.",
+    "correct": true,
+    "store_has_answer": null,
+    "retrieval_has_answer": null,
+    "loss_stage": "n/a (abstention)"
+  },
+  {
+    "question_id": "1568498a",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm looking back at our previous chess game and I was wondering, what was the move you made after 27. Kg2 Bd5+?",
+    "expected": "28. Kg3",
+    "answer": "After 27. Kg2 Bd5+, my move was 28. Kg3.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "18dcd5a5",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm going back to our previous chat about the Lost Temple of the Djinn one-shot. Can you remind me how many mummies the party will face in the temple?",
+    "expected": "4",
+    "answer": "I'm sorry, but I don't have specific information about the exact number of mummies the party will face in the temple. I know that the temple is guarded by mummies, undead warriors, and constructs, but the exact count of mummies wasn't mentioned.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": false,
+    "loss_stage": "retrieval loss"
+  },
+  {
+    "question_id": "1903aded",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I think we discussed work from home jobs for seniors earlier. Can you remind me what was the 7th job in the list you provided?",
+    "expected": "Transcriptionist.",
+    "answer": "I'm sorry, but I don't have the specific list of work from home jobs for seniors that you're referring to. I don't have any information about a 7th job in that list.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": false,
+    "loss_stage": "retrieval loss"
+  }
+]

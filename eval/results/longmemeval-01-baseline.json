@@ -1,0 +1,272 @@
+[
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 42 new postcards to your collection recently. That's a significant addition to your growing collection!",
+    "correct": false
+  },
+  {
+    "question_id": "031748ae",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+    "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
+    "answer": "When you started your new role as Senior Software Engineer, you led a team of 4 engineers. Now, you lead a team of 5 engineers.",
+    "correct": true
+  },
+  {
+    "question_id": "031748ae_abs",
+    "question_type": "knowledge-update",
+    "is_abstention": true,
+    "question": "How many engineers do I lead when I just started my new role as Software Engineer Manager?",
+    "expected": "The information provided is not enough. You mentioned starting the role as Senior Software Engineer but not Software Engineer Manager.",
+    "answer": "When you started as a Software Engineer Manager, you led a team of 4 engineers.",
+    "correct": false
+  },
+  {
+    "question_id": "06db6396",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many projects have I completed since starting painting classes?",
+    "expected": "5",
+    "answer": "You've completed 5 projects since starting your painting classes. That's great progress!",
+    "correct": true
+  },
+  {
+    "question_id": "07741c44",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "Where do I initially keep my old sneakers?",
+    "expected": "under my bed",
+    "answer": "You initially kept your old sneakers under the bed, but you're planning to move them to a shoe rack this weekend as part of your closet organization.",
+    "correct": true
+  },
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You had three doctor's appointments in March. You saw your primary care physician, Dr. Smith, on March 3rd for your bronchitis diagnosis. You also had a follow-up with your orthopedic surgeon, Dr. Thompson, on March 20th, and you're scheduled to see your neurologist, Dr. Johnson, for an EMG test on April 1st to investigate the numbness in your left hand, which started around March 15th.",
+    "correct": false
+  },
+  {
+    "question_id": "0100672e",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much did I spend on each coffee mug for my coworkers?",
+    "expected": "$12",
+    "answer": "You spent $60 on 5 coffee mugs, so each mug cost about $12.",
+    "correct": true
+  },
+  {
+    "question_id": "078150f1",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much more money did I raise than my initial goal in the charity cycling event?",
+    "expected": "$50",
+    "answer": "You raised $250 in total, but I don't have information about your initial goal. Could you remind me what that was?",
+    "correct": false
+  },
+  {
+    "question_id": "099778bb",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "What percentage of leadership positions do women hold in the my company?",
+    "expected": "20%",
+    "answer": "Currently, women occupy 20% of the leadership positions in your company, holding 20 out of the 100 leadership roles.",
+    "correct": true
+  },
+  {
+    "question_id": "09ba9854",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much will I save by taking the train from the airport to my hotel instead of a taxi?",
+    "expected": "$50",
+    "answer": "Based on your current plan, taking a taxi from Narita Airport to your hotel in Shinjuku will cost around $60. The train is generally a more affordable option. The Narita Express (N'EX) train, for example, costs around $30 one way. So, you would save approximately $30 by taking the train instead of a taxi.",
+    "correct": false
+  },
+  {
+    "question_id": "0e5e2d1a",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I wanted to follow up on our previous conversation about binaural beats for anxiety and depression. Can you remind me how many subjects were in the study published in the journal Music and Medicine that found significant reductions in symptoms of depression, anxiety, and stress?",
+    "expected": "38 subjects",
+    "answer": "The study in the journal Music and Medicine involved 38 subjects.",
+    "correct": true
+  },
+  {
+    "question_id": "1568498a",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm looking back at our previous chess game and I was wondering, what was the move you made after 27. Kg2 Bd5+?",
+    "expected": "28. Kg3",
+    "answer": "I don't have the record of that specific move. Could you remind me or check our previous conversation for the details?",
+    "correct": false
+  },
+  {
+    "question_id": "16c90bf4",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm looking back at our previous conversation about the Seco de Cordero recipe from Ancash. You mentioned using a light or medium-bodied beer, but I was wondering if you could remind me what type of beer you specifically recommended?",
+    "expected": "I recommended using a Pilsner or Lager for the recipe.",
+    "answer": "I recommended using a Pilsner beer for your Seco de Cordero recipe. It's a light-bodied beer that pairs well with the lamb stew.",
+    "correct": true
+  },
+  {
+    "question_id": "18dcd5a5",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm going back to our previous chat about the Lost Temple of the Djinn one-shot. Can you remind me how many mummies the party will face in the temple?",
+    "expected": "4",
+    "answer": "I'm sorry, I don't have information about the exact number of mummies in the temple. I do remember that the mummies have Armor Class 11, 45 hit points, and immunity to poison and psychic damage. They can also curse and infect creatures with Mummy Rot. As for the number, you might want to check your notes or the adventure module for that detail.",
+    "correct": false
+  },
+  {
+    "question_id": "1903aded",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I think we discussed work from home jobs for seniors earlier. Can you remind me what was the 7th job in the list you provided?",
+    "expected": "Transcriptionist.",
+    "answer": "The 7th job in the list was a virtual customer service representative. You're currently working as one, along with your other remote roles.",
+    "correct": false
+  },
+  {
+    "question_id": "06878be2",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "Can you suggest some accessories that would complement my current photography setup?",
+    "expected": "The user would prefer suggestions of Sony-compatible accessories or high-quality photography gear that can enhance their photography experience. They may not prefer suggestions of other brands' equipment or low-quality gear.",
+    "answer": "Given your current setup with the Sony A7R IV, here are a few accessories that might complement it well:\n\n1. **L-Bracket**: A versatile L-bracket can make it easier to switch between landscape and portrait orientations, especially when using a tripod like the Gitzo GT3543LS you're considering.\n2. **Extra Batteries**: Since you're interested in external battery packs, having a few spare NP-FZ100 batteries for your A7R IV can be handy during long shoots.\n3. **Camera Strap**: A comfortable and durable camera strap, like the Peak Design Slide or BlackRapid, can make carrying your camera more enjoyable.\n4. **Remote Shutter Release**: This can help you take shake-free photos, especially in low-light conditions or when using a tripod.\n5. **Memory Cards**: Investing in high-speed, high-capacity memory cards can ensure you never run out of storage during a shoot.",
+    "correct": true
+  },
+  {
+    "question_id": "06f04340",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "What should I serve for dinner this weekend with my homegrown ingredients?",
+    "expected": "The user would prefer dinner suggestions that incorporate their homegrown cherry tomatoes and herbs like basil and mint, highlighting recipes that showcase their garden produce. They might not prefer suggestions that do not utilize these specific ingredients or do not emphasize the use of homegrown elements.",
+    "answer": "Given your garden has cherry tomatoes, basil, and mint, you could try making a fresh Caprese salad with a twist—add some chopped mint to complement the basil. You could also grill some of your peppers and make a simple pasta dish with homegrown ingredients. Sounds like a delicious and fresh meal!",
+    "correct": true
+  },
+  {
+    "question_id": "07b6f563",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "Can you suggest some useful accessories for my phone?",
+    "expected": "The user would prefer suggestions of accessories that are compatible with an iPhone 13 Pro, such as high-quality screen protectors, durable cases, portable power banks, or phone wallet cases. They may not prefer suggestions of accessories that are not compatible with Apple products or do not enhance the functionality or protection of their phone.",
+    "answer": "I noticed you're looking for a new screen protector and a phone wallet case for your iPhone 13 Pro, possibly an OtterBox. I can also help you find a portable power bank with wireless charging capabilities. Do you have any specific features in mind for these accessories?",
+    "correct": true
+  },
+  {
+    "question_id": "09d032c9",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "I've been having trouble with the battery life on my phone lately. Any tips?",
+    "expected": "The user would prefer responses that build upon their previous mention of purchasing a portable power bank, such as suggestions on how to optimize its use, like ensuring it's fully charged before use. They might also appreciate tips on utilizing battery-saving features on their phone. The user may not prefer responses that suggest alternative solutions or unrelated advice.",
+    "answer": "I can suggest a few things. You mentioned you're interested in portable power banks. Having one with you can be a lifesaver for extending your phone's battery life while on the go. Also, consider adjusting your phone's settings like reducing screen brightness and closing unused apps to save power.",
+    "correct": true
+  },
+  {
+    "question_id": "0a34ad58",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "I’m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+    "expected": "The user would prefer responses that utilize their existing resources, such as their Suica card and TripIt app, to provide personalized tips for navigating Tokyo's public transportation. They might not prefer general tips or recommendations that do not take into account their prior preparations.",
+    "answer": "I understand that navigating a new city can be overwhelming, but you're well-prepared! You have a Suica card, which will make traveling on trains and subways a breeze. Also, since you're using the TripIt app, you can keep all your travel details organized in one place.\n\nFor getting around, make sure to familiarize yourself with the train lines near Shinjuku Station, as it's one of the busiest transportation hubs in Tokyo. You can also use Google Maps or an app like Japan Travel by Navitime for real-time navigation and train schedules. Don't hesitate to ask locals or hotel staff for help if you need it.",
+    "correct": true
+  },
+  {
+    "question_id": "001be529",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "How long did I wait for the decision on my asylum application?",
+    "expected": "over a year",
+    "answer": "It took over a year for your asylum application to be approved. I remember how significant this milestone was for you.",
+    "correct": true
+  },
+  {
+    "question_id": "0862e8bf",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "What is the name of my cat?",
+    "expected": "Luna",
+    "answer": "Your cat's name is Luna.",
+    "correct": true
+  },
+  {
+    "question_id": "0862e8bf_abs",
+    "question_type": "single-session-user",
+    "is_abstention": true,
+    "question": "What is the name of my hamster?",
+    "expected": "You did not mention this information. You mentioned your cat Luna but not your hamster.",
+    "answer": "You haven't mentioned having a hamster. Do you mean your cat, Luna?",
+    "correct": true
+  },
+  {
+    "question_id": "118b2229",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "How long is my daily commute to work?",
+    "expected": "45 minutes each way",
+    "answer": "Your daily commute to work is 45 minutes each way.",
+    "correct": true
+  },
+  {
+    "question_id": "15745da0",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "How long have I been collecting vintage cameras?",
+    "expected": "three months",
+    "answer": "You've been collecting vintage cameras for about three and a half months now. You mentioned having 17 cameras, including a Brownie Hawkeye, in your collection.",
+    "correct": false
+  },
+  {
+    "question_id": "08f4fc43",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many days had passed between the Sunday mass at St. Mary's Church and the Ash Wednesday service at the cathedral?",
+    "expected": "30 days. 31 days (including the last day) is also acceptable.",
+    "answer": "The Sunday mass at St. Mary's Church was on January 2nd, and the Ash Wednesday service at the cathedral was on February 1st. That's 30 days apart.",
+    "correct": true
+  },
+  {
+    "question_id": "0bb5a684",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many days before the team meeting I was preparing for did I attend the workshop on 'Effective Communication in the Workplace'?",
+    "expected": "7 days. 8 days (including the last day) is also acceptable.",
+    "answer": "You attended the workshop on 'Effective Communication in the Workplace' on January 10th, which is 7 days before your team meeting on January 17th.",
+    "correct": true
+  },
+  {
+    "question_id": "0bc8ad92",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many months have passed since I last visited a museum with a friend?",
+    "expected": "5",
+    "answer": "Since your last museum visit with a friend was on February 17th, and today is March 25th, about one month has passed.",
+    "correct": false
+  },
+  {
+    "question_id": "0bc8ad93",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "I mentioned visiting a museum two months ago. Did I visit with a friend or not?",
+    "expected": "No, you did not visit with a friend.",
+    "answer": "You visited the Natural History Museum with your dad two months ago, but the museum visit with a friend who is a chemistry professor happened at the Science Museum last year.",
+    "correct": false
+  },
+  {
+    "question_id": "0db4c65d",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book reading event at the local library, where the author of 'The Silent Patient' is discussing her latest thriller novel?",
+    "expected": "18 days. 19 days (including the last day) is also acceptable.",
+    "answer": "You finished \"The Seven Husbands of Evelyn Hugo\" on December 28, 2022, and attended the book reading event on January 15, 2023. That's 18 days later.",
+    "correct": true
+  }
+]

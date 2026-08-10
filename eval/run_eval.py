@@ -39,10 +39,11 @@ from rich import box
 
 import chatbot
 from scenarios import SCENARIOS
-from memory.consolidate import dedup_memories, evolve_memories, maybe_reflect
+from memory.consolidate import sleep_pass
 from memory.embedding_generation import generate_embeddings
 from memory import memory_store
 from memory.memory_store import get_core_memory, search_memories, stringify_retrieved_point
+from memory.transcripts import search_turns, stringify_turn
 from memory.update_memory import update_memories
 
 console = Console()
@@ -73,13 +74,15 @@ async def ask(user_id: int, question: str) -> str:
         search_vector=vec, user_id=user_id, query_text=question, include_old=True
     )
     strings = [stringify_retrieved_point(m) for m in retrieved]
+    past_turns = [stringify_turn(t) for t in search_turns(user_id, question)]
     core = await get_core_memory(user_id)
     if chatbot.COMPOSE_ON_READ and strings:
         with dspy.context(lm=chatbot._lm):
             strings = [chatbot._composer(question=question, memories=strings).digest]
     with dspy.context(lm=chatbot._lm):
         out = chatbot._responder(
-            core_memory=core, transcript=[], retrieved_memories=strings, question=question
+            core_memory=core, transcript=[], retrieved_memories=strings,
+            past_conversations=past_turns, question=question,
         )
     return out.response
 
@@ -89,9 +92,7 @@ async def run_scenario(idx: int, scenario: dict) -> list[dict]:
     for j, session in enumerate(scenario["sessions"]):
         session_id = f"eval-{idx}-{j}"
         await update_memories(user_id, session, session_id=session_id)
-        await maybe_reflect(user_id, session_id)
-        await dedup_memories(user_id, session_id)
-        await evolve_memories(user_id, session_id)
+        await sleep_pass(user_id, session_id)
 
     results = []
     for item in scenario["questions"]:
@@ -120,7 +121,7 @@ async def main():
     parser.add_argument("--filter", default="", help="only scenarios whose name contains this")
     parser.add_argument("--compose", action="store_true", help="enable compose-on-read")
     parser.add_argument("--no-ppr", action="store_true", help="disable PageRank ranking")
-    parser.add_argument("--out", default="", help="write raw results JSON to this path")
+    parser.add_argument("--out", default="", help="filename (written to eval/results/) or an absolute path")
     args = parser.parse_args()
 
     chatbot.COMPOSE_ON_READ = args.compose
@@ -159,7 +160,9 @@ async def main():
     console.print(table)
 
     if args.out:
-        out_path = args.out if os.path.isabs(args.out) else os.path.join(REPO, args.out)
+        results_dir = os.path.join(SCRIPT_DIR, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        out_path = args.out if os.path.isabs(args.out) else os.path.join(results_dir, args.out)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
         console.print(f"[dim]Raw results written to {out_path}[/dim]")
