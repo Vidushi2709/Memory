@@ -1,14 +1,18 @@
+from collections import Counter
+from typing import Literal
 import dspy
 from pydantic import BaseModel
 from datetime import datetime
 from memory.embedding_generation import generate_embeddings
+from memory.extract_memory import extract_memory, Memory
 from memory.memory_store import (
     EmbeddedMemory,
-    RetrievedMemory,
+    get_all_categories,
+    get_core_memory,
     mark_memory_old,
-    fetch_all_user_records,
     add_memory,
     search_memories,
+    set_core_memory,
 )
 import os
 from dotenv import load_dotenv
@@ -20,140 +24,160 @@ dspy.configure_cache(
     enable_memory_cache=False,
 )
 
+_lm = dspy.LM(
+    model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
+    api_key=os.getenv("OPEN_ROUTER_KEY"),
+)
+
+
 class MemoryWithIds(BaseModel):
-    memory_id: int      
+    memory_id: int
     memory_text: str
     memory_categories: list[str]
 
 
-class UpdateMemorySignature(dspy.Signature):
+class MemoryActionSignature(dspy.Signature):
     """
-    You will be given the conversation between user and assistant and some similar memories
-    from the database. Your goal is to decide how to combine the new memories into the
-    database with the existing memories.
+    Decide how a single new fact should change the memory store, given its most
+    similar existing memories.
 
     Actions meaning:
-    - ADD: add new memories into the database as a new memory
-    - UPDATE: mark an existing memory as old, then add a new richer memory to replace it.
-              The old memory is preserved in history (not deleted), so the user can still
-              ask questions like "where did I live before?".
-    - SUPERSEDE: mark a memory as old/outdated without adding a replacement (e.g. the
-                 information is simply no longer relevant).
-    - NOOP: No need to take any action
-
-    If no action is required you can finish.
-
-    Think less and do actions.
+    - ADD: no equivalent memory exists — store the fact as a new memory
+    - UPDATE: an existing memory covers this topic — mark it old and store richer
+              combined text. The old memory is preserved in history (not deleted),
+              so the user can still ask questions like "where did I live before?".
+    - SUPERSEDE: the fact makes an existing memory outdated with no replacement
+                 (e.g. the information is simply no longer relevant)
+    - NOOP: the fact adds nothing beyond what is already stored
     """
 
-    messages: list[dict] = dspy.InputField()
-    existing_memories: list[MemoryWithIds] = dspy.InputField()
-    summary: str = dspy.OutputField(
-        description="Summarize what you did. Very short (less than 10 words)"
+    fact: str = dspy.InputField()
+    similar_memories: list[MemoryWithIds] = dspy.InputField()
+    action: Literal["ADD", "UPDATE", "SUPERSEDE", "NOOP"] = dspy.OutputField()
+    target_memory_id: str = dspy.OutputField(
+        desc="Index of the memory to update/supersede. -1 or empty for ADD/NOOP."
+    )
+    memory_text: str = dspy.OutputField(
+        desc="Final text to store for ADD/UPDATE. Empty string otherwise."
     )
 
 
-async def update_memory_agent(
-    user_id: int,
-    message: list[dict],
-    existing_memories: list[RetrievedMemory],   
-):
-    def get_point_id(memory_id: int) -> str:
-        return existing_memories[memory_id].point_id
+class CoreMemorySignature(dspy.Signature):
+    """
+    Maintain a short always-visible profile of the user: name, location, work,
+    and their most important preferences. Plain sentences, under 80 words.
+    Use ONLY information present in current_core or new_facts — NEVER invent,
+    guess, or embellish details that were not stated.
+    Fold the new facts into current_core, dropping nothing that is still true.
+    If the new facts change nothing, return current_core unchanged.
+    """
 
-    async def add_new_memory(memory_text: str, categories: list[str]) -> str:
-        """Add a brand-new memory to the database."""
-        embeddings = await generate_embeddings([memory_text])
-        await add_memory(
-            embedded_memories=[
-                EmbeddedMemory(
-                    id="",
-                    user_id=user_id,
-                    memory_text=memory_text,
-                    categories=categories,
-                    embedding=embeddings[0],
-                    date=datetime.now().isoformat(),
-                )
-            ]
-        )
-        return f"Memory added: {memory_text}"
+    current_core: str = dspy.InputField()
+    new_facts: list[str] = dspy.InputField()
+    updated_core: str = dspy.OutputField()
 
-    async def update_existing_memory(memory_id: int, update_memory_text: str, categories: list[str]) -> str:
-        """Replace an existing memory (identified by its list index) with richer text.
-        The old memory is marked as superseded (preserved in history) and a new one is added."""
-        point_id = get_point_id(memory_id)
-        # Mark the old memory as superseded (soft-delete) — NOT hard-deleted
-        await mark_memory_old(point_id)
 
-        embeddings = await generate_embeddings([update_memory_text])
-        await add_memory(
-            embedded_memories=[
-                EmbeddedMemory(
-                    id="",
-                    user_id=user_id,
-                    memory_text=update_memory_text,
-                    categories=categories,
-                    embedding=embeddings[0],
-                    date=datetime.now().isoformat(),
-                    is_current=1,
-                )
-            ]
-        )
-        return f"Memory updated: {update_memory_text}"
+_decide_action = dspy.Predict(MemoryActionSignature)
+_core_updater = dspy.Predict(CoreMemorySignature)
 
-    async def supersede_memory(memory_id: int) -> str:
-        """Mark an existing memory as old/superseded without adding a replacement.
-        The record is preserved in history (not deleted) so historical questions
-        like 'where did I live before?' can still be answered."""
 
-        point_id = get_point_id(memory_id)
-        await mark_memory_old(point_id)
-        return f"Memory superseded (marked old): {memory_id}"
+def _safe_date(raw: str) -> str:
+    try:
+        return datetime.fromisoformat(raw).isoformat()
+    except (ValueError, TypeError):
+        return datetime.now().isoformat()
 
-    async def noop() -> str:
-        """No operation needed — nothing to add, update, or delete."""
-        return "No operation needed"
 
-    # Build the MemoryWithIds list that the LLM will reason about
-    existing_memories_with_ids = [
+async def _store(user_id: int, text: str, categories: list[str], importance: int, date: str):
+    embeddings = await generate_embeddings([text])
+    await add_memory(
+        embedded_memories=[
+            EmbeddedMemory(
+                id="",
+                user_id=user_id,
+                memory_text=text,
+                categories=categories,
+                embedding=embeddings[0],
+                date=date,
+                importance=importance,
+            )
+        ]
+    )
+
+
+async def _apply_fact(user_id: int, fact: Memory) -> str:
+    embedding = (await generate_embeddings([fact.information]))[0]
+    neighbors = await search_memories(search_vector=embedding, user_id=user_id, top_k=10)
+
+    similar = [
         MemoryWithIds(
             memory_id=i,
-            memory_text=mem.memory_text,
-            memory_categories=mem.categories,
+            memory_text=m.memory_text,
+            memory_categories=m.categories,
         )
-        for i, mem in enumerate(existing_memories)
+        for i, m in enumerate(neighbors)
     ]
 
-    memory_update = dspy.ReAct(
-        signature=UpdateMemorySignature,
-        tools=[add_new_memory, update_existing_memory, supersede_memory, noop],
-    )
-    with dspy.context(
-        lm=dspy.LM(
-            model="mistral/mistral-small-latest",
-            api_key=os.getenv("MISTRAL_API_KEY"),
-        )
-    ):
-        out = await memory_update.acall(
-            messages=message,
-            existing_memories=existing_memories_with_ids,
-        )
+    try:
+        with dspy.context(lm=_lm):
+            out = await _decide_action.acall(fact=fact.information, similar_memories=similar)
+    except Exception:
+        # LLM/parse failure — storing the fact as-is beats losing it
+        await _store(user_id, fact.information, fact.predicted_category, fact.importance, _safe_date(fact.date))
+        return "added"
 
-    return out.summary
+    if out.action == "NOOP":
+        return "noop"
+
+    text = (out.memory_text or "").strip() or fact.information
+    date = _safe_date(fact.date)
+
+    if out.action == "ADD":
+        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        return "added"
+
+    try:
+        target = int(out.target_memory_id)
+    except (ValueError, TypeError):
+        target = -1
+
+    if not (0 <= target < len(neighbors)):
+        # LLM pointed at a nonexistent memory — fall back to a plain add
+        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        return "added"
+
+    await mark_memory_old(neighbors[target].point_id)
+
+    if out.action == "UPDATE":
+        await _store(user_id, text, fact.predicted_category, fact.importance, date)
+        return "updated"
+
+    return "superseded"
+
+
+async def _refresh_core_memory(user_id: int, facts: list[str]):
+    current_core = await get_core_memory(user_id)
+    with dspy.context(lm=_lm):
+        out = await _core_updater.acall(current_core=current_core, new_facts=facts)
+
+    new_core = out.updated_core.strip()
+    if new_core and new_core != current_core:
+        embedding = (await generate_embeddings([new_core]))[0]
+        await set_core_memory(user_id, new_core, embedding)
 
 
 async def update_memories(user_id: int, messages: list[dict]):
-    latest_user_message = [x["content"] for x in messages if x["role"] == "user"][-1]
-    embedding = (await generate_embeddings([latest_user_message]))[0]
+    categories = await get_all_categories(user_id=user_id)
+    extracted = await extract_memory(messages, categories)
 
-    retrieved_memories = await search_memories(search_vector=embedding, user_id=user_id)
+    if extracted.no_info or not extracted.new_memories:
+        return "No new facts."
 
-    response = await update_memory_agent(
-        user_id=user_id,
-        existing_memories=retrieved_memories,   
-        message=messages,
-    )
-    return response
+    results = [await _apply_fact(user_id, fact) for fact in extracted.new_memories]
+    await _refresh_core_memory(user_id, [f.information for f in extracted.new_memories])
+
+    counts = Counter(results)
+    return ", ".join(f"{n} {action}" for action, n in counts.items())
 
 
 async def test():

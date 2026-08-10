@@ -29,13 +29,13 @@ from rich.table import Table
 from rich import box
 
 from memory.embedding_generation import generate_embeddings
-from memory.extract_memory import extract_memory
 from memory.memory_store import (
     add_memory,
     create_collection,
     delete_user_records,
     fetch_all_user_records,
     get_all_categories,
+    get_core_memory,
     search_memories,
     stringify_retrieved_point,
     EmbeddedMemory,
@@ -47,8 +47,8 @@ from memory.update_memory import update_memories
 dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
 
 _lm = dspy.LM(
-    model="mistral/mistral-small-latest",
-    api_key=os.getenv("MISTRAL_API_KEY"),
+    model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
+    api_key=os.getenv("OPEN_ROUTER_KEY"),
     temperature=0.7,
     max_tokens=1024,
 )
@@ -62,10 +62,12 @@ class ChatSignature(dspy.Signature):
     Use retrieved memories naturally in your replies — don't list or recite them.
     Keep responses concise and conversational. Avoid unnecessary preamble.
 
-    Memories can be marked [OLD/SUPERSEDED] for past states. Use these to answer
+    core_memory is a trusted always-current profile of the user. Retrieved
+    memories can be marked [OLD/SUPERSEDED] for past states. Use these to answer
     historical questions ("where did I live before?") while using current memories
     for present-state questions. Be clear about what's current vs. past when relevant.
     """
+    core_memory: str = dspy.InputField(desc="Short standing profile of the user (may be empty for new users)")
     transcript: list[dict] = dspy.InputField(desc="Recent conversation turns (last ~10 messages)")
     retrieved_memories: list[str] = dspy.InputField(desc="Relevant past memories about this user (may include old/superseded ones)")
     question: str = dspy.InputField(desc="The user's latest message")
@@ -92,20 +94,7 @@ class SessionSummarySignature(dspy.Signature):
 _responder = dspy.Predict(ChatSignature)
 _summariser = dspy.Predict(SessionSummarySignature)
 
-# Historical-query detection keywords
-_HISTORICAL_KEYWORDS = [
-    "before", "previously", "used to", "old", "past", "prior", "earlier",
-    "last time", "back then", "formerly", "previous", "history", "what was",
-    "where did i", "who did i", "when did i", "what did i",
-]
-
-
-def _is_historical_query(text: str) -> bool:
-    """Return True if the user's message looks like a question about their past."""
-    lower = text.lower()
-    return any(kw in lower for kw in _HISTORICAL_KEYWORDS)
-
-# Console 
+# Console
 
 console = Console()
 
@@ -145,6 +134,9 @@ def show_help():
 
 
 async def show_memories(user_id: int):
+    core = await get_core_memory(user_id)
+    if core:
+        console.print(Panel(core, title="[bold]Core Memory[/bold]", border_style="yellow", padding=(0, 2)))
     records = await fetch_all_user_records(user_id=user_id)
     if not records:
         console.print("[dim]No memories stored yet.[/dim]")
@@ -220,21 +212,27 @@ def fire_and_forget_memory(user_id: int, messages: list[dict]):
 
 async def proactive_recall(user_id: int):
     """
-    Fetch the most recent memories and surface them as a warm greeting so
+    Surface the core profile and most recent memories as a warm greeting so
     the user immediately feels that the AI remembers them.
     """
+    core = await get_core_memory(user_id)
     records = await fetch_all_user_records(user_id=user_id)
-    if not records:
+    if not core and not records:
         return  # new user — nothing to recall
 
     # Sort by date descending and take the 5 most recent
     sorted_records = sorted(records, key=lambda r: r.date, reverse=True)
     recent = sorted_records[:5]
 
-    bullets = "\n".join(f"  • {r.memory_text}" for r in recent)
+    parts = []
+    if core:
+        parts.append(f"[white]{core}[/white]")
+    if recent:
+        bullets = "\n".join(f"  • {r.memory_text}" for r in recent)
+        parts.append(f"[dim]Recent memories:[/dim]\n[white]{bullets}[/white]")
     console.print(
         Panel(
-            f"[dim]Here's what I remember about you:[/dim]\n\n[white]{bullets}[/white]",
+            "[dim]Here's what I remember about you:[/dim]\n\n" + "\n\n".join(parts),
             title="[bold yellow]✦ From Memory[/bold yellow]",
             border_style="yellow",
             padding=(0, 2),
@@ -339,21 +337,21 @@ async def chat_loop(user_id: int):
             await handle_forget(user_id)
             continue
 
-        # retrieve relevant memories
-        # For historical questions, also include old/superseded memories
-        historical = _is_historical_query(user_input)
+        # retrieve relevant memories — old ones included, tagged [OLD/SUPERSEDED]
         with console.status("[dim]Thinking…[/dim]", spinner="dots"):
             search_vec = (await generate_embeddings([user_input]))[0]
             retrieved = await search_memories(
                 search_vector=search_vec,
                 user_id=user_id,
-                include_old=historical,
+                include_old=True,
             )
             retrieved_strings = [stringify_retrieved_point(m) for m in retrieved]
+            core = await get_core_memory(user_id)
 
             # generate response
             with dspy.context(lm=_lm):
                 out = _responder(
+                    core_memory=core,
                     transcript=past_messages[-10:],
                     retrieved_memories=retrieved_strings,
                     question=user_input,
