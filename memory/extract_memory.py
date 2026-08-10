@@ -87,7 +87,7 @@ class MemoryExtractor(dspy.Signature):
 memory_extractor = dspy.Predict(MemoryExtractor)
 
 
-async def extract_memory(messages, categories=None):
+async def extract_memory(messages, categories=None, current_date=None):
     if categories is None:
         categories = []
 
@@ -97,11 +97,12 @@ async def extract_memory(messages, categories=None):
         lm=dspy.LM(
             model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
             api_key=os.getenv("OPEN_ROUTER_KEY"),
+            temperature=0.0,
         )
     ):
         out = await memory_extractor.acall(
             transcript=transcript,
-            current_date=datetime.now().date().isoformat(),
+            current_date=current_date or datetime.now().date().isoformat(),
             existing_categories=categories,
         )
 

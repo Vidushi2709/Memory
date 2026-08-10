@@ -1,11 +1,13 @@
 import math
 import re
+import threading
 from datetime import datetime
 from typing import Optional, List
 from uuid import uuid4
 from pydantic import BaseModel
 from rank_bm25 import BM25Okapi
 import chromadb
+from chromadb.config import Settings
 import networkx as nx
 import asyncio
 
@@ -20,7 +22,11 @@ LINK_EXPANSION_CAP = 3     # linked memories pulled in alongside search hits
 PPR_SEEDS = 8              # top fused hits used to seed Personalized PageRank
 USE_PPR = True             # PageRank ranking in the fusion (eval --no-ppr disables)
 
-_chroma = chromadb.PersistentClient(path="./chroma_db")  # persists to disk across sessions
+_chroma = chromadb.PersistentClient(
+    path="./chroma_db",  # persists to disk across sessions
+    settings=Settings(anonymized_telemetry=False),  # its event batching races under concurrency
+)
+_write_lock = threading.Lock()  # writes run in worker threads and can overlap
 
 
 def _get_collection():
@@ -74,34 +80,35 @@ async def create_collection():
 
 async def add_memory(embedded_memories: List[EmbeddedMemory]) -> List[str]:
     def _add():
-        col = _get_collection()
         now = datetime.now()
         ids = [uuid4().hex for _ in embedded_memories]
-        col.upsert(
-            ids=ids,
-            embeddings=[m.embedding for m in embedded_memories],
-            metadatas=[
-                {
-                    "user_id":     m.user_id,
-                    "memory_text": m.memory_text,
-                    "categories":  ",".join(m.categories),  # ChromaDB metadata values must be str/int/float
-                    "date":        m.date,
-                    "timestamp":   datetime.fromisoformat(m.date).timestamp(),
-                    "saved_at":    now.isoformat(),           # wall-clock time memory was written
-                    "is_current":  m.is_current,             # 1=active, 0=superseded
-                    "importance":  m.importance,
-                    "last_accessed": now.timestamp(),        # epoch of last retrieval hit
-                    "strength":    m.strength,
-                    "session_id":  m.session_id,
-                    "kind":        m.kind,
-                    "keywords":    ",".join(m.keywords),
-                    "context":     m.context,
-                    "links":       "",                       # comma-separated point ids
-                }
-                for m in embedded_memories
-            ],
-            documents=[m.memory_text for m in embedded_memories],
-        )
+        metadatas = [
+            {
+                "user_id":     m.user_id,
+                "memory_text": m.memory_text,
+                "categories":  ",".join(m.categories),  # ChromaDB metadata values must be str/int/float
+                "date":        m.date,
+                "timestamp":   to_epoch(m.date),
+                "saved_at":    now.isoformat(),           # wall-clock time memory was written
+                "is_current":  m.is_current,             # 1=active, 0=superseded
+                "importance":  m.importance,
+                "last_accessed": now.timestamp(),        # epoch of last retrieval hit
+                "strength":    m.strength,
+                "session_id":  m.session_id,
+                "kind":        m.kind,
+                "keywords":    ",".join(m.keywords),
+                "context":     m.context,
+                "links":       "",                       # comma-separated point ids
+            }
+            for m in embedded_memories
+        ]
+        with _write_lock:
+            _get_collection().upsert(
+                ids=ids,
+                embeddings=[m.embedding for m in embedded_memories],
+                metadatas=metadatas,
+                documents=[m.memory_text for m in embedded_memories],
+            )
         return ids
     return await asyncio.to_thread(_add)
 
@@ -122,18 +129,19 @@ async def delete_records(point_ids: List[str]):
 
 def _update_meta_sync(point_id: str, updates: dict):
     """Re-upsert a record with modified metadata (ChromaDB has no partial update)."""
-    col = _get_collection()
-    result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
-    if not result["ids"]:
-        return  # already gone
-    meta = result["metadatas"][0]
-    meta.update(updates)
-    col.upsert(
-        ids=[point_id],
-        embeddings=[result["embeddings"][0]],
-        metadatas=[meta],
-        documents=[result["documents"][0]],
-    )
+    with _write_lock:
+        col = _get_collection()
+        result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
+        if not result["ids"]:
+            return  # already gone
+        meta = result["metadatas"][0]
+        meta.update(updates)
+        col.upsert(
+            ids=[point_id],
+            embeddings=[result["embeddings"][0]],
+            metadatas=[meta],
+            documents=[result["documents"][0]],
+        )
 
 
 async def mark_memory_old(point_id: str):
@@ -154,13 +162,15 @@ async def add_links(point_id: str, linked_ids: List[str]):
         col = _get_collection()
         for a, b in [(point_id, lid) for lid in linked_ids if lid != point_id]:
             for src, dst in ((a, b), (b, a)):
-                result = col.get(ids=[src], include=["metadatas"])
-                if not result["ids"]:
-                    continue
-                existing = set(filter(None, result["metadatas"][0].get("links", "").split(",")))
-                if dst not in existing:
+                with _write_lock:
+                    result = col.get(ids=[src], include=["metadatas"])
+                    if not result["ids"]:
+                        continue
+                    existing = set(filter(None, result["metadatas"][0].get("links", "").split(",")))
+                    if dst in existing:
+                        continue
                     existing.add(dst)
-                    _update_meta_sync(src, {"links": ",".join(sorted(existing))})
+                _update_meta_sync(src, {"links": ",".join(sorted(existing))})
     await asyncio.to_thread(_link)
 
 
@@ -170,6 +180,18 @@ async def set_context(point_id: str, context: str):
 
 
 # read operations 
+
+_EPOCH = datetime(1970, 1, 1)
+
+
+def to_epoch(iso: str) -> float:
+    """ISO date -> unix seconds. datetime.timestamp() raises OSError on Windows
+    for pre-1970 dates (childhood events, birth years), so subtract instead."""
+    try:
+        return (datetime.fromisoformat(iso) - _EPOCH).total_seconds()
+    except (ValueError, TypeError):
+        return (datetime.now() - _EPOCH).total_seconds()
+
 
 def kind_of(meta) -> str:
     """Memory kind, with backfill for records written before the field existed."""
@@ -328,17 +350,18 @@ async def search_memories(
 
         # Touch winners: recency resets and strength grows (Ebbinghaus rehearsal)
         if top:
-            hit = col.get(ids=[id_ for _, id_, _ in top],
-                          include=["metadatas", "embeddings", "documents"])
-            for meta in hit["metadatas"]:
-                meta["last_accessed"] = now
-                meta["strength"] = float(meta.get("strength", STRENGTH_INIT)) + STRENGTH_PER_RECALL
-            col.upsert(
-                ids=hit["ids"],
-                embeddings=hit["embeddings"],
-                metadatas=hit["metadatas"],
-                documents=hit["documents"],
-            )
+            with _write_lock:
+                hit = col.get(ids=[id_ for _, id_, _ in top],
+                              include=["metadatas", "embeddings", "documents"])
+                for meta in hit["metadatas"]:
+                    meta["last_accessed"] = now
+                    meta["strength"] = float(meta.get("strength", STRENGTH_INIT)) + STRENGTH_PER_RECALL
+                col.upsert(
+                    ids=hit["ids"],
+                    embeddings=hit["embeddings"],
+                    metadatas=hit["metadatas"],
+                    documents=hit["documents"],
+                )
 
         out = [_build_retrieved(id_, meta, score) for score, id_, meta in top]
 
