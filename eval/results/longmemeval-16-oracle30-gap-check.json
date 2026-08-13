@@ -1,0 +1,28 @@
+[
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 25 new postcards since you started collecting again.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct",
+    "aggregate_used": false
+  },
+  {
+    "question_id": "031748ae",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+    "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
+    "answer": "When you first started your new role as Senior Software Engineer, you led a team of 4 engineers. Now, you lead a team of 5 engineers.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct",
+    "aggregate_used": true
+  }
+]

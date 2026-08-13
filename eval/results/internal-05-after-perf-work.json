@@ -1,0 +1,106 @@
+[
+  {
+    "scenario": "single_hop_basics",
+    "category": "single-hop",
+    "question": "What's my dog's name?",
+    "expected": "Bruno",
+    "answer": "Your dog's name is Bruno.",
+    "correct": true
+  },
+  {
+    "scenario": "single_hop_basics",
+    "category": "single-hop",
+    "question": "What do I do for work?",
+    "expected": "pediatric nurse",
+    "answer": "You're a pediatric nurse.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_city",
+    "category": "update",
+    "question": "Where do I live?",
+    "expected": "Bangalore",
+    "answer": "You currently live in Bangalore.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_city",
+    "category": "temporal",
+    "question": "Where did I live before?",
+    "expected": "Delhi",
+    "answer": "You used to live in Delhi before moving to Bangalore.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_job",
+    "category": "update",
+    "question": "Where do I work these days?",
+    "expected": "Zomato, as a delivery ops manager",
+    "answer": "You currently work as a delivery ops manager at Zomato.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_job",
+    "category": "temporal",
+    "question": "What was my old job?",
+    "expected": "barista at Blue Tokai",
+    "answer": "Your old job was as a barista at Blue Tokai. You've since moved on to a role as a delivery ops manager at Zomato.",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_trip",
+    "category": "multi-hop",
+    "question": "What gear have I bought for my December trip?",
+    "expected": "Quechua boots, bought to prepare for the Kedarkantha trek",
+    "answer": "You've bought new Quechua boots for your December trip to Kedarkantha.",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_friend",
+    "category": "multi-hop",
+    "question": "Why are we going to celebrate in Goa?",
+    "expected": "to celebrate Zubin's new job as a pilot",
+    "answer": "We're going to celebrate in Goa because you got a new job as a pilot. Congratulations!",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_friend",
+    "category": "exact-token",
+    "question": "What does Zubin do?",
+    "expected": "pilot with Indigo",
+    "answer": "Zubin is a pilot. He recently got a new job and is planning to celebrate in Goa.",
+    "correct": false
+  },
+  {
+    "scenario": "temporal_dates",
+    "category": "temporal",
+    "question": "Roughly when did I adopt Mochi?",
+    "expected": "around June 2026 (two months before the conversation)",
+    "answer": "You adopted Mochi around June 2026.",
+    "correct": true
+  },
+  {
+    "scenario": "abstention",
+    "category": "abstention",
+    "question": "What's my favorite movie?",
+    "expected": "ABSTAIN",
+    "answer": "I don't have information about your favorite movie. I know you love playing badminton on weekends, but you haven't shared your favorite movie with me yet.",
+    "correct": true
+  },
+  {
+    "scenario": "abstention",
+    "category": "abstention",
+    "question": "What car do I drive?",
+    "expected": "ABSTAIN",
+    "answer": "I don't have information about the car you drive. I only know that you love playing badminton on weekends.",
+    "correct": true
+  },
+  {
+    "scenario": "preference_details",
+    "category": "single-hop",
+    "question": "Can you suggest a snack for me?",
+    "expected": "a vegetarian, peanut-free suggestion that respects the allergy",
+    "answer": "Of course! Since you're vegetarian and allergic to peanuts, how about some hummus with pita bread or some fresh fruit? Both are delicious and safe for you.",
+    "correct": true
+  }
+]

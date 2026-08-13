@@ -1,0 +1,28 @@
+[
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You went to one doctor's appointment in March: you saw Dr. Smith on March 3rd and were diagnosed with bronchitis.",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss",
+    "aggregate_used": true
+  },
+  {
+    "question_id": "0bc8ad92",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many months have passed since I last visited a museum with a friend?",
+    "expected": "5",
+    "answer": "I don't have a record of you visiting a museum with a friend. The most recent museum visit I know about was on February 17th, when you went with your dad to the Natural History Museum. That was about a month ago.",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss",
+    "aggregate_used": true
+  }
+]

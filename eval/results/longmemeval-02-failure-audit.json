@@ -1,0 +1,122 @@
+[
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You had two doctor's appointments in March. One with Dr. Smith on March 3rd for your bronchitis, and another with Dr. Thompson, your orthopedic surgeon, on March 20th to check on your ACL recovery.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 25 new postcards to your collection recently, bringing your total to 53 new postcards since you started collecting again. These include the 1920s Paris postcard (PC001), 1950s beach scene postcard (PC002), 1960s Eiffel Tower postcard (PC003), and 22 others.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "078150f1",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much more money did I raise than my initial goal in the charity cycling event?",
+    "expected": "$50",
+    "answer": "You raised $250 in total, but I don't have information about your initial goal. Could you remind me what that was?",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss"
+  },
+  {
+    "question_id": "09ba9854",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much will I save by taking the train from the airport to my hotel instead of a taxi?",
+    "expected": "$50",
+    "answer": "Based on your plans, you're looking at saving around $60 by taking the train instead of a taxi from Narita Airport to your hotel in Shinjuku.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": false,
+    "loss_stage": "retrieval loss"
+  },
+  {
+    "question_id": "0bc8ad92",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many months have passed since I last visited a museum with a friend?",
+    "expected": "5",
+    "answer": "Looking at my records, your last visit to the Science Museum with a friend was on October 22, 2022. As of March 25, 2023, that's approximately 5 months and 3 days ago.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": false,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "0bc8ad93",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "I mentioned visiting a museum two months ago. Did I visit with a friend or not?",
+    "expected": "No, you did not visit with a friend.",
+    "answer": "From what I recall, you visited the Science Museum with a chemistry professor friend around that time, and the Natural History Museum with your dad a bit later.",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss"
+  },
+  {
+    "question_id": "1568498a",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm looking back at our previous chess game and I was wondering, what was the move you made after 27. Kg2 Bd5+?",
+    "expected": "28. Kg3",
+    "answer": "I don't have a record of our previous chess game. I only remember the current game where you just played Be6. Let's continue from there!",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss"
+  },
+  {
+    "question_id": "15745da0",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "How long have I been collecting vintage cameras?",
+    "expected": "three months",
+    "answer": "You've been collecting vintage cameras for three months now. You've built quite a collection, including that Brownie Hawkeye you got last week.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "18dcd5a5",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I'm going back to our previous chat about the Lost Temple of the Djinn one-shot. Can you remind me how many mummies the party will face in the temple?",
+    "expected": "4",
+    "answer": "I'm sorry, but I don't have specific information about the exact number of mummies in the temple. I only know that mummies are one of the guardians you'll encounter, along with undead warriors and constructs.",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": false,
+    "loss_stage": "write-path loss"
+  },
+  {
+    "question_id": "1903aded",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I think we discussed work from home jobs for seniors earlier. Can you remind me what was the 7th job in the list you provided?",
+    "expected": "Transcriptionist.",
+    "answer": "The 7th job in the list I provided was a telemarketing representative.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  }
+]

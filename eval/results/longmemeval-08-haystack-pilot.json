@@ -1,0 +1,74 @@
+[
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 25 new postcards to your collection since you started collecting again.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You had three doctor's appointments in March. You saw Dr. Smith on March 3rd, had a follow-up with Dr. Thompson on March 20th, and another appointment with Dr. Smith on March 27th.",
+    "correct": false,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "write-path loss"
+  },
+  {
+    "question_id": "0e5e2d1a",
+    "question_type": "single-session-assistant",
+    "is_abstention": false,
+    "question": "I wanted to follow up on our previous conversation about binaural beats for anxiety and depression. Can you remind me how many subjects were in the study published in the journal Music and Medicine that found significant reductions in symptoms of depression, anxiety, and stress?",
+    "expected": "38 subjects",
+    "answer": "The study published in the journal Music and Medicine involved 38 subjects.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "06878be2",
+    "question_type": "single-session-preference",
+    "is_abstention": false,
+    "question": "Can you suggest some accessories that would complement my current photography setup?",
+    "expected": "The user would prefer suggestions of Sony-compatible accessories or high-quality photography gear that can enhance their photography experience. They may not prefer suggestions of other brands' equipment or low-quality gear.",
+    "answer": "I don't have specific information about your current photography setup, but I can suggest some general accessories that might complement it. Here are a few ideas:\n\n1. **Extra Batteries**: Always have spare batteries for your camera to ensure you never run out of power during a shoot.\n2. **Memory Cards**: Invest in high-speed, high-capacity memory cards to store more photos and videos.\n3. **Lens Filters**: UV, polarizing, and ND filters can enhance your photos by reducing glare, improving colors, and controlling light.\n4. **Tripod**: A sturdy tripod can help you capture sharp images in low light and for long exposures.\n5. **Remote Shutter Release**: This allows you to take photos without touching the camera, reducing camera shake.\n6. **Camera Rain Cover**: Protect your gear from the elements with a waterproof cover.\n7. **Cleaning Kit**: Include a lens pen, microfiber cloths, and a blower to keep your lenses and camera body clean.\n\nIf you provide more details about your current setup, I can give more specific recommendations.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "001be529",
+    "question_type": "single-session-user",
+    "is_abstention": false,
+    "question": "How long did I wait for the decision on my asylum application?",
+    "expected": "over a year",
+    "answer": "You waited over a year for the decision on your asylum application.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "08f4fc43",
+    "question_type": "temporal-reasoning",
+    "is_abstention": false,
+    "question": "How many days had passed between the Sunday mass at St. Mary's Church and the Ash Wednesday service at the cathedral?",
+    "expected": "30 days. 31 days (including the last day) is also acceptable.",
+    "answer": "The Sunday mass at St. Mary's Church was on January 2nd, and the Ash Wednesday service at the cathedral was on February 1st. That means 30 days had passed between the two events.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  }
+]

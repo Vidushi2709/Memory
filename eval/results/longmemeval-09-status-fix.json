@@ -1,0 +1,14 @@
+[
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You had two doctor's appointments in March. You saw Dr. Smith on March 3rd and had a follow-up appointment with Dr. Thompson on March 20th.",
+    "correct": true,
+    "store_has_answer": false,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  }
+]

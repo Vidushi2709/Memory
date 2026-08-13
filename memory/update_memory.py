@@ -1,21 +1,22 @@
-from collections import Counter
-from typing import Literal
-import dspy
-from pydantic import BaseModel
+import logging
 from datetime import datetime
+import dspy
+import numpy as np
 from memory.embedding_generation import generate_embeddings
-from memory.extract_memory import extract_memory, Memory
+from memory.extract_memory import extract_memory, extract_missed, Memory
 from memory.memory_store import (
     EmbeddedMemory,
-    get_all_categories,
-    get_core_memory,
-    mark_memory_old,
     add_memory,
-    search_memories,
-    set_core_memory,
+    get_all_categories,
 )
-import os
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
+
+# Same threshold the sleep pass uses to merge duplicates (consolidate.py):
+# a "missed" fact this similar to a stored one would only be merged back later,
+# so don't store it at all.
+GAP_DUP_SIMILARITY = 0.9
 
 load_dotenv()
 
@@ -24,166 +25,165 @@ dspy.configure_cache(
     enable_memory_cache=False,
 )
 
-_lm = dspy.LM(
-    model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
-    api_key=os.getenv("OPEN_ROUTER_KEY"),
-)
+def _safe_date(raw: str, fallback: str = "") -> str:
+    for candidate in (raw, fallback):
+        try:
+            return datetime.fromisoformat(candidate).isoformat()
+        except (ValueError, TypeError):
+            continue
+    return datetime.now().isoformat()
 
 
-class MemoryWithIds(BaseModel):
-    memory_id: int
-    memory_text: str
-    memory_categories: list[str]
-
-
-class MemoryActionSignature(dspy.Signature):
-    """
-    Decide how a single new fact should change the memory store, given its most
-    similar existing memories.
-
-    Actions meaning:
-    - ADD: no equivalent memory exists — store the fact as a new memory
-    - UPDATE: an existing memory covers this topic — mark it old and store richer
-              combined text. The old memory is preserved in history (not deleted),
-              so the user can still ask questions like "where did I live before?".
-    - SUPERSEDE: the fact makes an existing memory outdated with no replacement
-                 (e.g. the information is simply no longer relevant)
-    - NOOP: the fact adds nothing beyond what is already stored
-    """
-
-    fact: str = dspy.InputField()
-    similar_memories: list[MemoryWithIds] = dspy.InputField()
-    action: Literal["ADD", "UPDATE", "SUPERSEDE", "NOOP"] = dspy.OutputField()
-    target_memory_id: str = dspy.OutputField(
-        desc="Index of the memory to update/supersede. -1 or empty for ADD/NOOP."
-    )
-    memory_text: str = dspy.OutputField(
-        desc="Final text to store for ADD/UPDATE. Empty string otherwise."
-    )
-
-
-class CoreMemorySignature(dspy.Signature):
-    """
-    Maintain a short always-visible profile of the user: name, location, work,
-    and their most important preferences. Plain sentences, under 80 words.
-    Use ONLY information present in current_core or new_facts — NEVER invent,
-    guess, or embellish details that were not stated.
-    Fold the new facts into current_core, dropping nothing that is still true.
-    If the new facts change nothing, return current_core unchanged.
-    """
-
-    current_core: str = dspy.InputField()
-    new_facts: list[str] = dspy.InputField()
-    updated_core: str = dspy.OutputField()
-
-
-_decide_action = dspy.Predict(MemoryActionSignature)
-_core_updater = dspy.Predict(CoreMemorySignature)
-
-
-def _safe_date(raw: str) -> str:
-    try:
-        return datetime.fromisoformat(raw).isoformat()
-    except (ValueError, TypeError):
-        return datetime.now().isoformat()
-
-
-async def _store(user_id: int, text: str, categories: list[str], importance: int, date: str, session_id: str = ""):
-    embeddings = await generate_embeddings([text])
-    await add_memory(
+async def _store_all(user_id: int, facts: list[Memory], dates: list[str], session_id: str = "") -> list[str]:
+    """One embedding call and one write for the whole session's facts — the
+    per-fact version paid a model round trip and a DB upsert each time."""
+    embeddings = await generate_embeddings([f.information for f in facts])
+    return await add_memory(
         embedded_memories=[
             EmbeddedMemory(
                 id="",
                 user_id=user_id,
-                memory_text=text,
-                categories=categories,
-                embedding=embeddings[0],
+                memory_text=fact.information,
+                categories=fact.predicted_category,
+                embedding=embedding,
                 date=date,
-                importance=importance,
+                importance=fact.importance,
                 session_id=session_id,
+                keywords=fact.keywords,
+                context=fact.context,
+                status=fact.status,
             )
+            for fact, embedding, date in zip(facts, embeddings, dates)
         ]
     )
 
 
-async def _apply_fact(user_id: int, fact: Memory, session_id: str = "") -> str:
-    embedding = (await generate_embeddings([fact.information]))[0]
-    neighbors = await search_memories(
-        search_vector=embedding,
-        user_id=user_id,
-        query_text=fact.information,
-        top_k=10,
-    )
+async def _completeness_pass(
+    user_id: int,
+    messages: list[dict],
+    stored: list[Memory],
+    categories: list[str],
+    session_id: str,
+    current_date: str,
+) -> int:
+    """Recover facts the first extraction dropped. Best-effort: any failure here
+    leaves the first pass's writes intact and returns 0.
 
-    similar = [
-        MemoryWithIds(
-            memory_id=i,
-            memory_text=m.memory_text,
-            memory_categories=m.categories,
+    The same session extracts different fact subsets run to run even at
+    temperature 0, and with reasoning done in code and retrieval at 9/9,
+    P(all needed facts stored) is the accuracy ceiling. A second call that sees
+    the first pass's output is differently conditioned, so it surfaces the
+    dropped facts instead of re-deriving the same subset.
+    """
+    try:
+        out = None
+        for _ in range(2):  # structured-output parsing fails intermittently
+            try:
+                out = await extract_missed(
+                    messages, [f.information for f in stored], categories,
+                    current_date or None,
+                )
+                break
+            except Exception:
+                continue
+        if out is None or out.nothing_missed or not out.missed_memories:
+            return 0
+
+        fresh = [f for f in out.missed_memories if f.about_user]
+        if not fresh:
+            return 0
+
+        # The gap pass re-emits paraphrases of stored facts despite being told
+        # not to — drop anything near-duplicate to a first-pass fact or to a
+        # gap fact already kept, at the sleep pass's own merge threshold.
+        embeddings = await generate_embeddings(
+            [f.information for f in fresh] + [f.information for f in stored]
         )
-        for i, m in enumerate(neighbors)
-    ]
+        arr = np.asarray(embeddings, dtype=np.float32)
+        arr /= np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9
+        new_rows, seen = arr[: len(fresh)], arr[len(fresh):]
 
-    try:
-        with dspy.context(lm=_lm):
-            out = await _decide_action.acall(fact=fact.information, similar_memories=similar)
-    except Exception:
-        # LLM/parse failure — storing the fact as-is beats losing it
-        await _store(user_id, fact.information, fact.predicted_category, fact.importance, _safe_date(fact.date), session_id)
-        return "added"
+        keep: list[tuple[Memory, list[float]]] = []
+        for fact, row, raw in zip(fresh, new_rows, embeddings):
+            if float((seen @ row).max()) >= GAP_DUP_SIMILARITY:
+                continue
+            keep.append((fact, raw))
+            seen = np.vstack([seen, row[None, :]])
+        if not keep:
+            return 0
 
-    if out.action == "NOOP":
-        return "noop"
-
-    text = (out.memory_text or "").strip() or fact.information
-    date = _safe_date(fact.date)
-
-    if out.action == "ADD":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
-        return "added"
-
-    try:
-        target = int(out.target_memory_id)
-    except (ValueError, TypeError):
-        target = -1
-
-    if not (0 <= target < len(neighbors)):
-        # LLM pointed at a nonexistent memory — fall back to a plain add
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
-        return "added"
-
-    await mark_memory_old(neighbors[target].point_id)
-
-    if out.action == "UPDATE":
-        await _store(user_id, text, fact.predicted_category, fact.importance, date, session_id)
-        return "updated"
-
-    return "superseded"
+        await add_memory([
+            EmbeddedMemory(
+                id="",
+                user_id=user_id,
+                memory_text=fact.information,
+                categories=fact.predicted_category,
+                embedding=raw,
+                date=_safe_date(fact.date, current_date),
+                importance=fact.importance,
+                session_id=session_id,
+                keywords=fact.keywords,
+                context=fact.context,
+                status=fact.status,
+            )
+            for fact, raw in keep
+        ])
+        return len(keep)
+    except Exception as e:
+        log.warning("completeness pass failed (first-pass facts unaffected): %s", e)
+        return 0
 
 
-async def _refresh_core_memory(user_id: int, facts: list[str]):
-    current_core = await get_core_memory(user_id)
-    with dspy.context(lm=_lm):
-        out = await _core_updater.acall(current_core=current_core, new_facts=facts)
-
-    new_core = out.updated_core.strip()
-    if new_core and new_core != current_core:
-        embedding = (await generate_embeddings([new_core]))[0]
-        await set_core_memory(user_id, new_core, embedding)
+EXTRACT_ATTEMPTS = 3
 
 
-async def update_memories(user_id: int, messages: list[dict], session_id: str = ""):
+async def _extract_with_retry(messages, categories, current_date):
+    """Structured-output parsing fails intermittently on every model we have
+    tried. A dropped extraction silently loses a whole session, so retry."""
+    last = None
+    for attempt in range(EXTRACT_ATTEMPTS):
+        try:
+            return await extract_memory(messages, categories, current_date or None)
+        except Exception as e:
+            last = e
+    raise last
+
+
+async def update_memories(user_id: int, messages: list[dict], session_id: str = "", current_date: str = ""):
+    """
+    Thin write path: extract facts and store them append-only, one LLM call total.
+
+    All judgment-heavy work — reconciling contradictions, superseding, linking,
+    dedup, core-profile rewrites — runs in the sleep-time pass at session end
+    (memory/consolidate.py: sleep_pass), where one large-context call sees the
+    whole session at once instead of many small calls compounding errors.
+    """
     categories = await get_all_categories(user_id=user_id)
-    extracted = await extract_memory(messages, categories)
+    extracted = await _extract_with_retry(messages, categories, current_date)
 
     if extracted.no_info or not extracted.new_memories:
         return "No new facts."
 
-    results = [await _apply_fact(user_id, fact, session_id) for fact in extracted.new_memories]
-    await _refresh_core_memory(user_id, [f.information for f in extracted.new_memories])
+    # general knowledge and assistant-produced content are not memories about
+    # the user — stored, they steal retrieval slots from the facts that are
+    facts = [f for f in extracted.new_memories if f.about_user]
+    dropped = len(extracted.new_memories) - len(facts)
+    if not facts:
+        return "No new facts."
+    dates = [_safe_date(f.date, current_date) for f in facts]
+    await _store_all(user_id, facts, dates, session_id)
 
-    counts = Counter(results)
-    return ", ".join(f"{n} {action}" for action, n in counts.items())
+    recovered = await _completeness_pass(
+        user_id, messages, facts, categories, session_id, current_date
+    )
+
+    n = len(facts)
+    msg = f"{n} fact(s) noted"
+    if dropped:
+        msg += f" ({dropped} general-knowledge dropped)"
+    if recovered:
+        msg += f" (+{recovered} recovered by gap check)"
+    return msg
 
 
 async def test():
