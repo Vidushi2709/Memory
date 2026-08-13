@@ -1,0 +1,62 @@
+[
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "You had one confirmed doctor's appointment in March: a follow-up with orthopedic surgeon Dr. Thompson on March 20th, 2023, to discuss your knee recovery. You also have a planned appointment with neurologist Dr. Johnson on April 1st, but that’s not in March.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  },
+  {
+    "question_id": "0100672e",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much did I spend on each coffee mug for my coworkers?",
+    "expected": "$12",
+    "answer": "You spent $12 on each coffee mug for your coworkers. That’s $60 total for five mugs.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 25 new postcards to your collection since you restarted collecting.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "031748ae",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+    "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
+    "answer": "When you first started your new role as Senior Software Engineer, you led a team of four engineers. Now, you lead a team of five engineers.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "031748ae_abs",
+    "question_type": "knowledge-update",
+    "is_abstention": true,
+    "question": "How many engineers do I lead when I just started my new role as Software Engineer Manager?",
+    "expected": "The information provided is not enough. You mentioned starting the role as Senior Software Engineer but not Software Engineer Manager.",
+    "answer": "You lead a team of five engineers in your new role as Senior Software Engineer. You mentioned this yourself on May 27, 2023, when you said, \"I've been enjoying my role as Senior Software Engineer for a while, especially the part where I now lead a team of five engineers — it's been a great experience so far, and I'm excited to see how they'll grow under my guidance.\"",
+    "correct": false,
+    "store_has_answer": null,
+    "retrieval_has_answer": null,
+    "loss_stage": "n/a (abstention)"
+  }
+]

@@ -39,10 +39,12 @@ from rich import box
 
 import chatbot
 from scenarios import SCENARIOS
+from memory.aggregate import maybe_aggregate
 from memory.consolidate import sleep_pass
 from memory.embedding_generation import generate_embeddings
 from memory import memory_store
 from memory.memory_store import get_core_memory, search_memories, stringify_retrieved_point
+from memory.grounding import unverified_terms
 from memory.transcripts import search_turns, stringify_turn
 from memory.update_memory import update_memories
 
@@ -76,13 +78,17 @@ async def ask(user_id: int, question: str) -> str:
     strings = [stringify_retrieved_point(m) for m in retrieved]
     past_turns = [stringify_turn(t) for t in search_turns(user_id, question)]
     core = await get_core_memory(user_id)
+    aggregate = await maybe_aggregate(user_id, question)
     if chatbot.COMPOSE_ON_READ and strings:
         with dspy.context(lm=chatbot._lm):
             strings = [chatbot._composer(question=question, memories=strings).digest]
     with dspy.context(lm=chatbot._lm):
         out = chatbot._responder(
             core_memory=core, transcript=[], retrieved_memories=strings,
-            past_conversations=past_turns, question=question,
+            past_conversations=past_turns,
+            unverified_terms=unverified_terms(question, [core] + strings + past_turns),
+            computed_aggregate=aggregate,
+            question=question,
         )
     return out.response
 

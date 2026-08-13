@@ -53,6 +53,7 @@ from rich.table import Table
 from rich import box
 
 import chatbot
+from memory.aggregate import maybe_aggregate
 from memory.consolidate import sleep_pass
 from memory.embedding_generation import generate_embeddings
 from memory.memory_store import (
@@ -61,6 +62,7 @@ from memory.memory_store import (
     search_memories,
     stringify_retrieved_point,
 )
+from memory.grounding import unverified_terms
 from memory.transcripts import archive_exchange, load_transcripts, search_turns, stringify_turn
 from memory.update_memory import update_memories
 
@@ -104,15 +106,38 @@ _judge = dspy.Predict(LMEJudgeSignature)
 _derivable = dspy.Predict(DerivableSignature)
 
 
+AUDIT_CHUNK_CHARS = 40_000  # one judge call's worth of records
+
+
 async def audit_derivable(question: str, expected: str, records: list[str]) -> bool:
+    """True if the expected answer is derivable from these records.
+
+    Haystack stores hold hundreds of records (~500k chars), far past a single
+    call's context, so audit in chunks and take the OR — one chunk containing
+    the evidence is enough. Without chunking every large store audits as False.
+    """
     if not records:
         return False
-    try:
-        with dspy.context(lm=chatbot._lm):
-            out = _derivable(question=question, expected=expected, records=records)
-        return bool(out.derivable)
-    except Exception:
-        return False
+
+    chunks, current, size = [], [], 0
+    for rec in records:
+        if current and size + len(rec) > AUDIT_CHUNK_CHARS:
+            chunks.append(current)
+            current, size = [], 0
+        current.append(rec)
+        size += len(rec)
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        try:
+            with dspy.context(lm=chatbot._lm):
+                out = _derivable(question=question, expected=expected, records=chunk)
+            if bool(out.derivable):
+                return True
+        except Exception as e:
+            console.print(f"  [dim red]audit chunk failed: {str(e)[:60]}[/dim red]")
+    return False
 
 
 def lme_date(raw: str) -> str:
@@ -123,6 +148,10 @@ def lme_date(raw: str) -> str:
 async def run_question(idx: int, item: dict) -> dict:
     user_id = 5000 + idx
     sessions = list(zip(item["haystack_sessions"], item["haystack_dates"]))
+    # oldest first: the dataset lists sessions out of chronological order for 42%
+    # of haystack questions, and a real deployment sees conversations in time
+    # order. Ingesting as-listed made newer facts look like the ones to supersede.
+    sessions.sort(key=lambda session_and_date: session_and_date[1])
     if len(sessions) > 10:
         console.print(f"  [dim]ingesting {len(sessions)} sessions…[/dim]")
 
@@ -153,7 +182,10 @@ async def run_question(idx: int, item: dict) -> dict:
         if len(sessions) > 10:
             console.print(f"  [dim]  …{min(start + len(batch), len(sessions))}/{len(sessions)} sessions[/dim]")
         try:
-            await sleep_pass(user_id, list(session_ids))
+            # the profile rewrite is the most expensive stage and intermediate
+            # versions are discarded — build it once, after the last batch
+            is_last = start + len(batch) >= len(sessions)
+            await sleep_pass(user_id, list(session_ids), refresh_core=is_last)
         except Exception as e:
             console.print(f"  [dim red]sleep pass error: {e}[/dim red]")
 
@@ -191,10 +223,13 @@ async def run_question(idx: int, item: dict) -> dict:
         {"role": "user", "content": f"(For reference, today's date is {lme_date(item['question_date'])}.)"},
         {"role": "assistant", "content": "Noted."},
     ]
+    aggregate = await maybe_aggregate(user_id, question, current_date=lme_date(item["question_date"]))
     with dspy.context(lm=chatbot._lm):
         out = chatbot._responder(
             core_memory=core, transcript=transcript,
             retrieved_memories=retrieved_strings, past_conversations=past_turns,
+            unverified_terms=unverified_terms(question, [core] + retrieved_strings + past_turns),
+            computed_aggregate=aggregate,
             question=question,
         )
     answer = out.response
@@ -232,6 +267,7 @@ async def run_question(idx: int, item: dict) -> dict:
         "store_has_answer": store_has,
         "retrieval_has_answer": retrieval_has,
         "loss_stage": stage,
+        "aggregate_used": bool(aggregate),
     }
 
 
@@ -280,10 +316,16 @@ async def main():
     console.print(f"[bold]LongMemEval {setting} — {len(sample)} questions[/bold] "
                   f"(sleep pass every {SLEEP_EVERY} session(s), workdir: {_workdir})\n")
 
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    out_path = args.out if os.path.isabs(args.out) else os.path.join(RESULTS_DIR, args.out)
+
     results = []
     for idx, item in enumerate(sample):
         console.print(f"[bold cyan]{idx + 1}/{len(sample)} {item['question_id']}[/bold cyan]")
         results.append(await run_question(idx, item))
+        # save after every question — these runs are long and get interrupted
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
 
     table = Table(box=box.ROUNDED, border_style="cyan", header_style="bold cyan")
     table.add_column("Question type")
@@ -326,10 +368,6 @@ async def main():
         f"survived retrieval: {sum(in_retr)}/{len(in_retr)}[/dim]"
     )
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    out_path = args.out if os.path.isabs(args.out) else os.path.join(RESULTS_DIR, args.out)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
     console.print(f"[dim]Raw results written to {out_path}[/dim]")
 
 

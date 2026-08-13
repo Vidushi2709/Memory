@@ -101,4 +101,21 @@ SCENARIOS = [
              "category": "single-hop"},
         ],
     },
+    {
+        # counting with a planned-vs-attended trap: the aggregation path must
+        # count the two attended concerts and exclude the one merely booked
+        "name": "counting_events",
+        "sessions": [
+            [u("Went to the Prateek Kuhad concert last night — incredible show!"),
+             a("Sounds amazing!")],
+            [u("Caught another concert yesterday, a small indie band at Fandom. Loved it."),
+             a("Two great shows!")],
+            [u("I just booked tickets for the Coldplay concert in January. Can't wait!"),
+             a("That'll be fantastic!")],
+        ],
+        "questions": [
+            {"q": "How many concerts have I been to?", "expect": "2",
+             "category": "aggregation"},
+        ],
+    },
 ]

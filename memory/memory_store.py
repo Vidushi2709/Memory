@@ -17,14 +17,34 @@ EMBEDDING_DIM = 384  # all-MiniLM-L6-v2
 STRENGTH_INIT = 5.0        # initial Ebbinghaus strength, in days of decay scale
 STRENGTH_PER_RECALL = 1.0  # strength gained each time a memory is retrieved
 RRF_K = 60                 # reciprocal rank fusion constant
-RELEVANCE_FLOOR = 0.3      # min cosine similarity to enter the vector ranking
+RELEVANCE_FLOOR = 0.10     # min TRUE cosine similarity to enter the vector ranking.
+                           # Calibrated, not guessed: a question and the memory
+                           # answering it can sit as low as 0.15 ("allergic to?" vs
+                           # "cannot eat shellfish"), so 0.25+ costs real recall.
 LINK_EXPANSION_CAP = 3     # linked memories pulled in alongside search hits
 PPR_SEEDS = 8              # top fused hits used to seed Personalized PageRank
+PPR_MIN_SHARE = 0.01       # share of the top PageRank score a node must reach to count
 USE_PPR = True             # PageRank ranking in the fusion (eval --no-ppr disables)
+IMPORTANCE_WEIGHT = 0.15   # importance and retention only break ties — relevance leads
+RETENTION_WEIGHT = 0.10
+STALE_PENALTY = 0.30       # a superseded memory must lose to a current one of equal relevance
+
+# ChromaDB batches telemetry events in a plain dict with no lock, so two threads
+# can race to delete the same key and raise KeyError in the middle of a query —
+# which surfaces here as a whole sleep pass failing. anonymized_telemetry=False
+# only suppresses the network send; the unsafe batching still runs on every
+# get(). Neutralise the code path itself. Reproduced at ~1.3% of concurrent
+# reads before this, zero after.
+try:
+    from chromadb.telemetry.product.posthog import Posthog
+
+    Posthog.capture = lambda self, event: None
+except Exception:  # library layout changed — the setting below still applies
+    pass
 
 _chroma = chromadb.PersistentClient(
     path="./chroma_db",  # persists to disk across sessions
-    settings=Settings(anonymized_telemetry=False),  # its event batching races under concurrency
+    settings=Settings(anonymized_telemetry=False),
 )
 _write_lock = threading.Lock()  # writes run in worker threads and can overlap
 
@@ -50,6 +70,8 @@ class EmbeddedMemory(BaseModel):
     kind: str = "fact"  # fact | summary | insight
     keywords: List[str] = []
     context: str = ""
+    status: str = "happened"  # happened | planned | considered | ongoing
+    links: List[str] = []     # point ids this memory is related to
 
 
 class RetrievedMemory(BaseModel):
@@ -64,6 +86,7 @@ class RetrievedMemory(BaseModel):
     session_id: str = ""
     kind: str = "fact"
     context: str = ""
+    status: str = "happened"
     links: list[str] = []
     linked: bool = False  # True if pulled in via link expansion, not ranked search
 
@@ -98,7 +121,8 @@ async def add_memory(embedded_memories: List[EmbeddedMemory]) -> List[str]:
                 "kind":        m.kind,
                 "keywords":    ",".join(m.keywords),
                 "context":     m.context,
-                "links":       "",                       # comma-separated point ids
+                "status":      m.status,                 # happened/planned/considered/ongoing
+                "links":       ",".join(m.links),        # comma-separated point ids
             }
             for m in embedded_memories
         ]
@@ -127,21 +151,26 @@ async def delete_records(point_ids: List[str]):
     await asyncio.to_thread(_delete)
 
 
+def _update_meta_locked(point_id: str, updates: dict):
+    """Re-upsert a record with modified metadata (ChromaDB has no partial update).
+    Caller must already hold _write_lock."""
+    col = _get_collection()
+    result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
+    if not result["ids"]:
+        return  # already gone
+    meta = result["metadatas"][0]
+    meta.update(updates)
+    col.upsert(
+        ids=[point_id],
+        embeddings=[result["embeddings"][0]],
+        metadatas=[meta],
+        documents=[result["documents"][0]],
+    )
+
+
 def _update_meta_sync(point_id: str, updates: dict):
-    """Re-upsert a record with modified metadata (ChromaDB has no partial update)."""
     with _write_lock:
-        col = _get_collection()
-        result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
-        if not result["ids"]:
-            return  # already gone
-        meta = result["metadatas"][0]
-        meta.update(updates)
-        col.upsert(
-            ids=[point_id],
-            embeddings=[result["embeddings"][0]],
-            metadatas=[meta],
-            documents=[result["documents"][0]],
-        )
+        _update_meta_locked(point_id, updates)
 
 
 async def mark_memory_old(point_id: str):
@@ -162,6 +191,8 @@ async def add_links(point_id: str, linked_ids: List[str]):
         col = _get_collection()
         for a, b in [(point_id, lid) for lid in linked_ids if lid != point_id]:
             for src, dst in ((a, b), (b, a)):
+                # read and write under ONE lock: releasing between them let a
+                # concurrent link add overwrite the list this one just read
                 with _write_lock:
                     result = col.get(ids=[src], include=["metadatas"])
                     if not result["ids"]:
@@ -170,7 +201,7 @@ async def add_links(point_id: str, linked_ids: List[str]):
                     if dst in existing:
                         continue
                     existing.add(dst)
-                _update_meta_sync(src, {"links": ",".join(sorted(existing))})
+                    _update_meta_locked(src, {"links": ",".join(sorted(existing))})
     await asyncio.to_thread(_link)
 
 
@@ -217,6 +248,7 @@ def _build_retrieved(id_, metadata, score, linked=False) -> RetrievedMemory:
         session_id=metadata.get("session_id", ""),
         kind=kind_of(metadata),
         context=metadata.get("context", ""),
+        status=metadata.get("status", "happened"),
         links=list(filter(None, metadata.get("links", "").split(","))),
         linked=linked,
     )
@@ -236,7 +268,14 @@ async def search_memories(
     Vector similarity and BM25 keyword rankings are fused with reciprocal
     rank fusion (Zep-style), then re-ranked by:
 
-        score = fused relevance + retention + importance (1-10 scaled to [0,1])
+        score = fused relevance                     (0-1, dominant)
+              + 0.10 * retention
+              + 0.15 * importance                   (1-10 scaled to [0,1])
+              - 0.30 if superseded
+
+    Relevance leads deliberately: giving retention and importance full weight
+    let an important-but-unrelated memory outrank an exact match, and left a
+    superseded fact tied with the fact that replaced it.
 
     Retention follows Ebbinghaus (MemoryBank): e^(-days_since_recall / strength),
     where strength grows on every retrieval hit — stale memories are demoted in
@@ -280,15 +319,21 @@ async def search_memories(
         # Vector ranking
         vec_rank = []
         try:
+            # ask for the ineligible ones on top: they are filtered out below,
+            # and without the headroom a store full of superseded memories
+            # returns almost nothing
+            ineligible = len(all_recs["ids"]) - len(eligible)
             results = col.query(
                 query_embeddings=[search_vector],
-                n_results=min(fetch_k, len(all_recs["ids"])),
+                n_results=min(fetch_k + ineligible, len(all_recs["ids"])),
                 where=where,
                 include=["distances"],
             )
             for id_, dist in zip(results["ids"][0], results["distances"][0]):
-                # ChromaDB cosine distance: 0 = identical, 2 = opposite
-                if id_ in eligible and 1.0 - (dist / 2.0) >= RELEVANCE_FLOOR:
+                # ChromaDB cosine distance is 1 - similarity: 0 identical,
+                # 1 unrelated, 2 opposite. Halving it rated unrelated memories
+                # 0.5 and let everything through the floor.
+                if id_ in eligible and 1.0 - dist >= RELEVANCE_FLOOR:
                     vec_rank.append(id_)
         except Exception:
             pass
@@ -322,7 +367,11 @@ async def search_memories(
             if any(personalization.values()):
                 try:
                     pr = nx.pagerank(graph, personalization=personalization)
-                    ppr_rank = [n for n, _ in sorted(pr.items(), key=lambda x: x[1], reverse=True)][:fetch_k]
+                    # nodes the seeds cannot reach still carry a numerical crumb
+                    # (~1e-6); ranking them handed unrelated memories RRF credit
+                    cutoff = max(pr.values()) * PPR_MIN_SHARE
+                    ppr_rank = [n for n, s in sorted(pr.items(), key=lambda x: x[1], reverse=True)
+                                if s >= cutoff][:fetch_k]
                 except Exception:
                     pass
 
@@ -343,7 +392,14 @@ async def search_memories(
             strength = float(meta.get("strength", STRENGTH_INIT))
             retention = math.exp(-((now - last_accessed) / 86400.0) / strength)
             importance = int(meta.get("importance", 5)) / 10.0
-            scored.append((fused / max_rrf + retention + importance, id_, meta))
+            stale = STALE_PENALTY if int(meta.get("is_current", 1)) == 0 else 0.0
+            scored.append((
+                fused / max_rrf
+                + RETENTION_WEIGHT * retention
+                + IMPORTANCE_WEIGHT * importance
+                - stale,
+                id_, meta,
+            ))
 
         scored.sort(key=lambda s: s[0], reverse=True)
         top = scored[:top_k]
@@ -380,14 +436,15 @@ async def search_memories(
     return await asyncio.to_thread(_search)
 
 
-async def fetch_user_records_raw(user_id: int) -> dict:
-    """Raw ChromaDB dump for a user, embeddings included — used by consolidation."""
+async def fetch_user_records_raw(user_id: int, include_embeddings: bool = True) -> dict:
+    """Raw ChromaDB dump for a user — used by consolidation. Only dedup needs the
+    embeddings; every other stage was paying 384 floats per record for nothing."""
     def _fetch():
         col = _get_collection()
-        return col.get(
-            where={"user_id": {"$eq": user_id}},
-            include=["metadatas", "embeddings", "documents"],
-        )
+        include = ["metadatas", "documents"]
+        if include_embeddings:
+            include.append("embeddings")
+        return col.get(where={"user_id": {"$eq": user_id}}, include=include)
     return await asyncio.to_thread(_fetch)
 
 
@@ -460,10 +517,13 @@ async def get_all_categories(user_id: int) -> List[str]:
 def stringify_retrieved_point(retrieved_memory: RetrievedMemory) -> str:
     status_tag = "" if retrieved_memory.is_current else " [OLD/SUPERSEDED]"
     linked_tag = " [LINKED]" if retrieved_memory.linked else ""
+    # an intention must never read like something that happened
+    state = retrieved_memory.status
+    state_tag = f" [{state.upper()}, did not happen]" if state in ("planned", "considered") else ""
     saved = retrieved_memory.date[:19].replace("T", " ") if retrieved_memory.date else "unknown"
     context = f" Context: {retrieved_memory.context}" if retrieved_memory.context else ""
     return (
-        f"{retrieved_memory.memory_text}{status_tag}{linked_tag} "
+        f"{retrieved_memory.memory_text}{status_tag}{linked_tag}{state_tag} "
         f"(Categories: {retrieved_memory.categories}) "
         f"[Saved: {saved}] "
         f"Score: {retrieved_memory.score:.2f}{context}"

@@ -28,9 +28,12 @@ from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
-from memory.consolidate import dedup_memories, evolve_memories, maybe_reflect
+from memory.aggregate import maybe_aggregate
+from memory.consolidate import sleep_pass
 from memory.embedding_generation import generate_embeddings
-from memory.transcripts import archive_exchange
+from memory.grounding import unverified_terms
+from memory.llm import get_chat_lm
+from memory.transcripts import archive_exchange, search_turns, stringify_turn
 from memory.memory_store import (
     add_memory,
     create_collection,
@@ -48,12 +51,7 @@ from memory.update_memory import update_memories
 
 dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
 
-_lm = dspy.LM(
-    model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
-    api_key=os.getenv("OPEN_ROUTER_KEY"),
-    temperature=0.7,
-    max_tokens=1024,
-)
+_lm = get_chat_lm()
 
 
 # DSPy Signatures 
@@ -64,15 +62,56 @@ class ChatSignature(dspy.Signature):
     Use retrieved memories naturally in your replies — don't list or recite them.
     Keep responses concise and conversational. Avoid unnecessary preamble.
 
+    Act on what you already know instead of asking for it again. When the user
+    asks for a suggestion or recommendation, give a concrete one immediately,
+    filtered by everything you know about them (diet, allergies, budget, tastes).
+    Do NOT ask what they are in the mood for or ask them to restate a preference
+    you have stored — answer first; ask only if the answer is impossible without
+    more information.
+
     core_memory is a trusted always-current profile of the user. Retrieved
     memories can be marked [OLD/SUPERSEDED] for past states. Use these to answer
     historical questions ("where did I live before?") while using current memories
     for present-state questions. Be clear about what's current vs. past when relevant.
+
+    past_conversations holds VERBATIM excerpts of earlier chats — what was
+    actually typed, by both of you. Treat them as an exact record: when asked
+    what was said, recommended, or listed before, read the answer straight out
+    of them and quote it. Never claim you lack information that appears there.
+
+    GUARDED RECALL: first fill in supporting_evidence by quoting the exact
+    words from a memory or past conversation that state what was asked. If
+    nothing states it, write NONE — a source about a similar-but-different
+    thing (another role title, person, pet, or item) does NOT count. When
+    supporting_evidence is NONE, the response must say you don't have that
+    information, optionally naming the near-match; never answer from it.
+
+    Memories tagged [PLANNED, did not happen] or [CONSIDERED, did not happen]
+    record intentions, not events. Never count or describe them as things the
+    user did; say they were planned or considered.
+
+    unverified_terms lists exact phrases from the question that appear in NO
+    source. These were checked mechanically, so trust them over your own
+    impression: the user is asking about something you have no record of. Say so
+    plainly, name the closest thing you do have, and do not answer as if the
+    unverified phrase were established.
+
+    computed_aggregate, when non-empty, holds a count or time span computed IN
+    CODE over a full scan of every stored memory — not a search, so nothing was
+    missed. Its arithmetic is reliable: state its number as the answer and use
+    its member list to explain. Do not re-derive, hedge, or offer alternatives
+    to a number it provides.
     """
     core_memory: str = dspy.InputField(desc="Short standing profile of the user (may be empty for new users)")
     transcript: list[dict] = dspy.InputField(desc="Recent conversation turns (last ~10 messages)")
     retrieved_memories: list[str] = dspy.InputField(desc="Relevant past memories about this user (may include old/superseded ones)")
+    past_conversations: list[str] = dspy.InputField(desc="Verbatim excerpts of earlier conversations — an exact record of what was said")
+    unverified_terms: list[str] = dspy.InputField(desc="Phrases from the question found in no source (mechanically checked). Empty is normal.")
+    computed_aggregate: str = dspy.InputField(desc="Count or time span computed in code from a full memory scan. Empty unless the question asks for one. When present, its number IS the answer basis.")
     question: str = dspy.InputField(desc="The user's latest message")
+    supporting_evidence: str = dspy.OutputField(
+        desc="Exact words from a source that state what was asked, or NONE. Written before the response."
+    )
     response: str = dspy.OutputField(desc="Your reply to the user")
     save_memory: bool = dspy.OutputField(
         description="True if the user just shared something worth remembering"
@@ -246,10 +285,7 @@ def fire_and_forget_memory(user_id: int, messages: list[dict], session_id: str):
     async def _run():
         try:
             summary = await update_memories(user_id=user_id, messages=messages, session_id=session_id)
-            console.print(f"\n[dim]  ✦ Memory updated: {summary}[/dim]")
-            insights = await maybe_reflect(user_id, session_id)
-            if insights:
-                console.print(f"[dim]  ✦ Reflection: {len(insights)} new insight(s) stored.[/dim]")
+            console.print(f"\n[dim]  ✦ Memory: {summary}[/dim]")
         except Exception as e:
             console.print(f"\n[dim red]  Memory update failed: {e}[/dim red]")
 
@@ -345,15 +381,12 @@ async def finish_session(user_id: int, past_messages: list[dict], session_id: st
 
     await save_session_summary(user_id, past_messages, session_id)
 
-    with console.status("[dim]Consolidating memories…[/dim]", spinner="dots"):
+    with console.status("[dim]Consolidating memories (sleep pass)…[/dim]", spinner="dots"):
         try:
-            result = await dedup_memories(user_id, session_id)
-            evolved = await evolve_memories(user_id, session_id)
-            if evolved:
-                result += f", {evolved} context(s) evolved"
-            console.print(f"[dim]  ✦ Consolidation: {result}.[/dim]")
+            result = await sleep_pass(user_id, session_id)
+            console.print(f"[dim]  ✦ Sleep pass: {result}.[/dim]")
         except Exception as e:
-            console.print(f"[dim red]  Consolidation failed: {e}[/dim red]")
+            console.print(f"[dim red]  Sleep pass failed: {e}[/dim red]")
 
 
 # Core chat loop 
@@ -418,7 +451,10 @@ async def chat_loop(user_id: int):
                 include_old=True,
             )
             retrieved_strings = [stringify_retrieved_point(m) for m in retrieved]
+            # raw-transcript recall: what was actually said, incl. assistant answers
+            past_turns = [stringify_turn(t) for t in search_turns(user_id, user_input)]
             core = await get_core_memory(user_id)
+            aggregate = await maybe_aggregate(user_id, user_input)
 
             if COMPOSE_ON_READ and retrieved_strings:
                 with dspy.context(lm=_lm):
@@ -431,6 +467,9 @@ async def chat_loop(user_id: int):
                     core_memory=core,
                     transcript=past_messages[-10:],
                     retrieved_memories=retrieved_strings,
+                    past_conversations=past_turns,
+                    unverified_terms=unverified_terms(user_input, [core] + retrieved_strings + past_turns),
+                    computed_aggregate=aggregate,
                     question=user_input,
                 )
 

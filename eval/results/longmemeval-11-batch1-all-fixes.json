@@ -1,0 +1,122 @@
+[
+  {
+    "question_id": "00ca467f",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How many doctor's appointments did I go to in March?",
+    "expected": "2",
+    "answer": "I don't have a record of how many doctor's appointments you attended in March. However, I do know you planned to schedule appointments with Dr. Smith and Dr. Johnson to discuss the numbness in your left hand, and you also considered seeing gastroenterologist Dr. Patel for heartburn and acid reflux. These were planned but not confirmed as completed.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  },
+  {
+    "question_id": "0100672e",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much did I spend on each coffee mug for my coworkers?",
+    "expected": "$12",
+    "answer": "You spent $60 total on coffee mugs for your coworkers, which means approximately $12 per mug if you bought 5 mugs (as mentioned in your past conversation).",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "01493427",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many new postcards have I added to my collection since I started collecting again?",
+    "expected": "25",
+    "answer": "You've added 8 new postcards to your collection since you restarted collecting, bringing your total to 25.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  },
+  {
+    "question_id": "031748ae",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+    "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
+    "answer": "When you first started your new role as Senior Software Engineer, you led a team of four engineers. Now, you lead a team of five engineers.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "031748ae_abs",
+    "question_type": "knowledge-update",
+    "is_abstention": true,
+    "question": "How many engineers do I lead when I just started my new role as Software Engineer Manager?",
+    "expected": "The information provided is not enough. You mentioned starting the role as Senior Software Engineer but not Software Engineer Manager.",
+    "answer": "You lead a team of five engineers in your new role as Senior Software Engineer.",
+    "correct": false,
+    "store_has_answer": null,
+    "retrieval_has_answer": null,
+    "loss_stage": "n/a (abstention)"
+  },
+  {
+    "question_id": "06db6396",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "How many projects have I completed since starting painting classes?",
+    "expected": "5",
+    "answer": "You've completed 4 to 5 painting projects since starting your classes, and you've mentioned feeling confident and accomplished in your progress. That's a great milestone!",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  },
+  {
+    "question_id": "07741c44",
+    "question_type": "knowledge-update",
+    "is_abstention": false,
+    "question": "Where do I initially keep my old sneakers?",
+    "expected": "under my bed",
+    "answer": "You initially keep your old sneakers under the bed, but they’ve started to smell due to poor ventilation and moisture buildup.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "078150f1",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much more money did I raise than my initial goal in the charity cycling event?",
+    "expected": "$50",
+    "answer": "You raised $250 in donations during the charity cycling event, which is $50 more than your initial goal of $200.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "099778bb",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "What percentage of leadership positions do women hold in the my company?",
+    "expected": "20%",
+    "answer": "Women occupy 20 of the leadership positions in your company. Given that your company has 100 leadership positions overall, this means women hold 20% of leadership roles.",
+    "correct": true,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "correct"
+  },
+  {
+    "question_id": "09ba9854",
+    "question_type": "multi-session",
+    "is_abstention": false,
+    "question": "How much will I save by taking the train from the airport to my hotel instead of a taxi?",
+    "expected": "$50",
+    "answer": "Taking the train from Narita Airport to Shinjuku Station will save you roughly $150–$240 compared to a taxi, depending on traffic. The train (N'EX) costs about $28, while a taxi can range from $180 to $270.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": true,
+    "loss_stage": "reasoning loss"
+  }
+]
