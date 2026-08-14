@@ -1,395 +1,308 @@
-# Memory System on LongMemEval — Evaluation Report
-
-**Date:** 2026-08-10
-**Benchmark:** LongMemEval (oracle setting), arXiv 2410.10813
-**Model:** Mistral Small 3.2 24B via OpenRouter
-**Sample:** 30 questions, stratified 5 per question type
-
-The memory chatbot scored **19 / 30 (63%)** on a stratified sample of LongMemEval's oracle setting. The profile is sharply uneven: preference and user-fact questions are near ceiling, while two categories fail for structural reasons — the system never stores what the *assistant* said, and it cannot aggregate multiple memories into one answer. Both point to concrete, buildable fixes rather than tuning.
-
-## System under test
-
-A Python memory layer over ChromaDB and a 24B open-weights model, built up over three tiers:
-
-- **Write path (Mem0-style):** an LLM extracts atomic facts (with importance 1-10, resolved dates, keywords, and a context sentence), then decides per fact whether to ADD, UPDATE, SUPERSEDE, or NOOP against its ten nearest neighbors.
-- **Retrieval:** vector similarity + BM25 keyword search + Personalized PageRank over a memory-link graph, fused by reciprocal rank, then re-ranked by Ebbinghaus retention (`e^(−days/strength)`, strength grows per recall) and importance.
-- **Always-in-prompt core profile** (MemGPT-style), rewritten by the LLM as facts change.
-- **Consolidation:** session-end dedup, importance-triggered reflection insights, A-Mem-style memory evolution of linked neighbors' context lines.
-- **Session layer:** every memory tagged with its session; raw transcripts archived to an experience bank (`transcripts/`).
-
-Old memories are soft-deleted (`is_current=0`), never removed, so history stays queryable.
-
-## Method
-
-LongMemEval embeds questions in multi-session chat histories and tests five memory abilities. The **oracle setting** supplies only the evidence sessions — no distractor haystack — so these scores measure whether the pipeline can extract, update, and reason over what it saw. They are an upper bound: the harder `_s` setting (~115k-token haystacks) additionally stresses needle-finding.
-
-Each question's sessions were ingested through the real write path with their historical dates (the extractor resolves "last month" against the session's date, not today's), then the question was asked as of its question date and judged by an LLM against the gold answer. Abstention variants (`*_abs`) count as correct only when the system admits it lacks the information. Runner: `eval/run_longmemeval.py`; full answers in `eval/results/longmemeval-01-baseline.json` (see `eval/results/README.md` for the index of all runs).
-
-## Results
-
-| Question type | Correct | Total | Accuracy |
-|---|---:|---:|---:|
-| Single-session preference | 5 | 5 | 100% |
-| Single-session user | 4 | 5 | 80% |
-| Knowledge update | 3 | 5 | 60% |
-| Temporal reasoning | 3 | 5 | 60% |
-| Multi-session | 2 | 5 | 40% |
-| Single-session assistant | 2 | 5 | 40% |
-| Abstention subset | 1 | 2 | 50% |
-| **Total** | **19** | **30** | **63%** |
-
-## Failure analysis
-
-### 1. The system doesn't remember its own words
-
-Worst structural gap (single-session-assistant, 40%). Extraction stores facts about the *user*; recommendations, lists, and answers the assistant produced are never memorized, so any "what did you tell me?" question fails.
-
-> **Q:** What was my Bishop's second move in our chess game?
-> **A:** "I don't have the record of that specific move."
-
-The raw material for the fix already exists: every assistant turn is archived verbatim in the transcript experience bank — it just isn't searchable yet.
-
-### 2. No aggregation across memories
-
-Multi-session questions (40%) require collecting *all* matching memories and counting or comparing them. Top-5 conversational retrieval isn't built for enumeration, so answers came back partial, or a needed fact was missing entirely.
-
-> **Q:** How much more money did I raise than my initial goal in the charity cycling event?
-> **A:** "You raised $250 in total, but I don't have information about your initial goal."
-
-### 3. Date arithmetic done by the model, not by code
-
-Temporal questions (60%) usually retrieved the right dated memories, then miscomputed the duration between dates. The metadata holds exact timestamps; the subtraction should be deterministic instead of delegated to the LLM.
-
-> **Q:** How long have I been collecting vintage cameras?
-> **A:** "…about three and a half months" (gold: a much longer span)
-
-### 4. Abstention collapses under similar-memory pressure
-
-With a near-matching memory available, the model answered from the wrong memory instead of admitting the asked-about fact was never stated (1 of 2 abstention questions). The same failure mode is documented across all six systems in the MemConflict benchmark.
-
-> **Q:** How many engineers do I lead in my new role as *Software Engineer Manager*? (never discussed)
-> **A:** Answered with the team size from a *different, similar* role memory.
-
-## Reading the numbers fairly
-
-Published LongMemEval scores in the 80–95% range (Emergence 86%, vendor-reported Zep/Mastra and others higher) are not directly comparable: they run the harder haystack setting but on GPT-4o-class frontier models, typically with cross-encoder rerankers. This run pairs the easier oracle setting with a 24B open model. The per-category *shape* — strong on single-session user facts and preferences, weak on assistant recall, aggregation, and temporal arithmetic — matches the failure modes the benchmark's own paper reports for memory systems generally, which suggests the harness is measuring the right things.
-
-For internal context: the project's own 13-question scenario harness scores 100%, which is why this benchmark was brought in — the internal set no longer discriminates. Two measured experiments preceded this run: compose-on-read (query-tailored memory digest) showed no accuracy gain, added latency, and blurred fact attribution once — disabled; PageRank over the link graph showed no measurable difference yet but costs no LLM calls — kept.
-
-## Recommendations, ranked
-
-1. **Search the transcript archive.** Make raw turns retrievable alongside distilled memories (turn-match, session-retrieve granularity). Directly targets the 40% single-session-assistant category and parts of multi-session.
-2. **Aggregation-aware answering.** For enumeration/comparison questions, sweep by time-range or topic instead of top-5, and add an explicit "select relevant memories, then answer" stage (the selection behavior RL-trained managers learned in Memory-R1).
-3. **Deterministic date math.** Compute durations and orderings in code from stored timestamps and hand the model the result — same philosophy as deterministic freshness resolution ("don't ask the LLM to track versions").
-4. **Deterministic freshness for knowledge updates.** Same-subject conflicts resolved by timestamp in code, with the LLM only extracting candidates.
-5. **Guarded abstention.** Prompt-side: answer only if a retrieved memory actually states the asked-about fact; near-matches should be named as such, not silently adopted.
-
-## Addendum (2026-08-11): loss-attribution audit
-
-To locate *where* failures happen, the runner gained two audit stages per question: a **store audit** (is the gold answer derivable from everything the write path stored?) and a **retrieval audit** (is it derivable from what retrieval actually surfaced?). Re-running only the 10 previously failed non-abstention questions:
-
-| Outcome on re-run | Count |
-|---|---:|
-| Passed this time (run-to-run variance) | 4 |
-| Write-path loss (answer never stored) | 4 |
-| Retrieval loss (stored, not surfaced) | 1 |
-| Reasoning loss (surfaced, answered wrong) | 1 |
-
-Two findings changed the plan:
-
-1. **The write path is the largest systematic loss — but it splits in two.** Two of the four write-path losses are the by-design gap (assistant content is never extracted); two are genuine extraction misses where the small model dropped a stated detail ("initial goal", "with my friend").
-2. **40% of the original failures were nondeterminism**, not systematic error — all LLM calls ran at temperature 0.7, so per-fact judgments and answers were stochastic.
-
-**Changes made in response** (this codebase, same day):
-
-- **Temperature 0.0** on all memory operations and answering — removes the variance term.
-- **Transcript-turn retrieval** — raw exchanges (the experience bank) are BM25-searched alongside memories, so assistant answers are recallable; targets the SSA 40% category.
-- **Thin write path + sleep-time consolidation** — the hot path is now a single extraction call storing facts append-only; all judgment (supersede/link reconciliation in one large-context call, dedup, evolution, reflection, core-profile rewrite) moved to a session-end sleep pass with exclusive write authority (the Letta sleep-time pattern). This cuts per-fact hot-path LLM judgments from ~7 to ~2 and gives reconciliation full-session context.
-
-Store-coverage ("answer present in store") is the tracked metric for the write path: 6/10 before the restructure, on the failed-question subset.
-
-### Re-benchmark after the restructure (same 30 questions)
-
-| Question type | Before | After |
-|---|---:|---:|
-| Single-session preference | 100% | 80% |
-| Single-session user | 80% | 100% |
-| Knowledge update | 60% | 80% |
-| Temporal reasoning | 60% | 80% |
-| Multi-session | 40% | 100% |
-| Single-session assistant | 40% | 40% |
-| Abstention subset | 50% | 50% |
-| **Total** | **63%** | **80%** |
-
-Store coverage rose from 6/10 (failure subset) to **26/28 (93%)** across all non-abstention questions — the write path now retains nearly everything, confirming the audit's diagnosis. Loss attribution after: 2 write-path, 2 retrieval, 1 reasoning.
-
-Remaining weaknesses: single-session-assistant failures moved from *write-path* losses to *retrieval/truncation* losses — the assistant's words are now stored (transcripts) but turn search surfaces the wrong exchange or the 1200-character excerpt cap cuts the needed detail (e.g. item 7 of a long list). Abstention under similar-memory pressure is still unsolved. Next fixes: longer/smarter transcript excerpts and guarded abstention.
-
-## Addendum (2026-08-11): retrieval and robustness fixes
-
-Follow-up work on the two weaknesses the 80% run left open, plus three bugs the
-haystack setup exposed. All verified; none committed.
-
-**Turn search returned nothing on short histories (fixed).** Single-session-assistant
-questions failed with the answer present in the transcript archive but never retrieved.
-Root cause was not tuning: BM25's IDF term goes negative when a word appears in most
-of a small corpus, so the `score > 0` filter discarded every candidate. `search_turns`
-now ranks by BM25 but gates on non-stopword overlap. Targeted re-run: single-session
-assistant **0/3 → 3/3**, with exact gold answers ("28. Kg3", "4 mummies",
-"Transcriptionist"); 6/7 overall on the smoke set, 5/5 store coverage, 5/5 surviving
-retrieval.
-
-**Transcript excerpts were being ignored by the model (fixed).** Excerpts shared the
-`retrieved_memories` field and were treated as vague recollections — the model answered
-"I don't have the list" while the list sat in its context. They now occupy a separate
-`past_conversations` field framed as a verbatim record to quote from, and excerpt caps
-rose to 4000 characters so long lists survive.
-
-**Abstention (still unsolved).** Asked about a job title never mentioned, the model
-answers from a similar stored title. A `supporting_evidence` output field that forces
-quoting the source before answering did not fix it. Prompt-level approaches look
-exhausted; this likely needs a deterministic check that the specific entity asked
-about appears in a retrieved source. For context, the MemConflict benchmark found the
-best conflict-recognition score across six production memory systems was 0.25.
-
-**Three robustness bugs found and fixed:**
-
-| Bug | Symptom | Fix |
-|---|---|---|
-| Pre-1970 dates crash writes | `datetime.timestamp()` raises `[Errno 22]` on Windows for dates before 1970 — one childhood memory killed the whole session's write | `to_epoch()` subtracts from the epoch instead |
-| ChromaDB telemetry races | Concurrent ingestion dropped ~14% of sessions with an opaque event-key error | `anonymized_telemetry=False`; writes also take a thread lock |
-| `sleep_pass` skipped sessions | Running it periodically left earlier sessions unreconciled — no supersede, link, or core update | Accepts a batch of session ids |
-
-The first two would corrupt real user memory, not just benchmark runs. A concurrency
-stress test (60 concurrent writes plus links and supersedes) now passes with no lost
-writes and no errors.
-
-**Open finding, not yet addressed:** importance currently outweighs relevance in
-ranking. Reciprocal rank fusion normalizes by rank position, so an unrelated memory
-lands within ~3% of a perfect match on the relevance term while importance can differ
-by 0.8 — in one test an unrelated memory outranked a near-exact match. Suspect first
-if haystack retrieval underperforms.
-
-**Haystack pilot: set up, not yet run.** `--haystack` (the `_s` file, median 48
-sessions and 491 turns per question), `--sleep-every N`, and batched concurrent
-ingestion (~6x faster) are in place and running cleanly; the run was stopped for time.
-
-## Addendum (2026-08-11, later): haystack results, performance, model choice
-
-### Haystack pilot — 5/6 (83%)
-
-First run against the `_s` setting (median 48 sessions, ~490 turns per question).
-Retrieval surfaced the needed evidence in **6/6** questions under real distractor
-noise, which is the meaningful result: the pipeline had never faced competing
-sessions before. Not comparable to Zep (71.2%) or Emergence (86%) — six questions
-carries an enormous error bar, and those systems use frontier models on all 500.
-
-The single failure was a counting question, and the cause was **not** aggregation:
-
-> *How many doctor's appointments did I go to in March?* — gold **2**, answered **3**.
-
-The haystack mixes attended, scheduled, and merely-considered appointments
-("I'm *considering* scheduling with Dr. Patel", "I'm *scheduled* for an EMG on
-April 1st"). Extraction flattened intentions into completed facts, so the count
-was wrong before any counting happened. A retrieval-side aggregation fix — which
-was the queued remedy — would not have helped.
-
-**Fix: a `status` field** (`happened` / `planned` / `considered` / `ongoing`) on
-every extracted memory, asserted in the fact text too ("User is considering X"),
-persisted to ChromaDB, and surfaced at answer time as `[PLANNED, did not happen]`.
-Verified on the failing question: now answers **"two doctor's appointments —
-Dr. Smith on March 3rd and Dr. Thompson on March 20th"**. Beyond benchmarks, the
-old behaviour told users they attended appointments they had only thought about.
-
-### Performance: 18.4 min → 9.4 min per question
-
-Profiling one full question (51 sessions) showed it is **~100% LLM latency** —
-all local work (embeddings, ChromaDB, the O(n²) dedup comparison) totals ~75s of
-1107s. The O(n²) loop specifically was **2.3 seconds**.
-
-| Stage | Calls | LLM seconds |
-|---|---:|---:|
-| Extraction | 51 | 1225 (69%) |
-| Core profile refresh | 11 | 400 (23%) |
-| Reconcile | 11 | 118 |
-| Reflect / evolve / dedup | 33 | 112 |
-
-Two changes, both pure scheduling: **core refresh runs once** (it rebuilt an
-80-word profile eleven times and discarded ten), and the **independent sleep-pass
-stages run concurrently**. Measured result: **9.4 min/question, a 49% cut.**
-
-A third change — trimming the extraction schema — caused a silent quality
-regression the internal suite caught: "pilot with Indigo" became "pilot". The
-terseness instruction had bled from the search fields into the fact text. Fixed
-by scoping terseness explicitly and requiring names/employers/numbers to survive.
-**Timing measurements would never have caught this; the regression suite did.**
-
-### Provider latency is not stable
-
-A full 30-question run was launched and abandoned at 4/30 (3 pass, 1 fail).
-Elapsed time implied **~34 min/question**, versus 9.4 min measured hours earlier
-on identically-sized questions (46–52 sessions). A single extraction call
-re-timed at **38.3s against an 18.2s baseline** — same code, same input, ~2x
-slower upstream. Mistral Small 3.2 on OpenRouter's shared pool degrades under
-sustained load; it returned a 429 "temporarily rate-limited upstream" earlier.
-**Any timing claim here is only valid against a same-session baseline.**
-
-### Model selection
-
-Cost is not the binding constraint: a full 30-question haystack run is ~$0.94.
-Throughput is. Benchmarked on an identical extraction call:
-
-| Model | Time | Facts | Verdict |
-|---|---:|---:|---|
-| mistral-small-3.2 (current) | 18.2s | 12 | baseline |
-| gpt-oss-120b | 44.7s | 8 | 2.5x slower despite 0.53x price |
-| gpt-oss-20b | — | — | failed to produce parseable output |
-
-The gpt-oss models are reasoning models: they spend the token budget on
-chain-of-thought before emitting structured output, hit `max_tokens`, and get
-truncated. OpenRouter bills reasoning tokens as completion tokens, so the cheaper
-sticker price is partly illusory. **Cheaper per token ≠ cheaper for this
-workload.** Untested non-reasoning candidates: qwen3-30b-a3b-instruct (0.64x),
-gemma-3-12b (0.57x), nova-micro (0.46x).
-
-### Abstention: still unsolved after three attempts
-
-`031748ae_abs` has failed in every run today. Asked "how many engineers do I lead
-in my new role as **Software Engineer Manager**" when memory only records
-**Senior Software Engineer**, the model answers from the near-match. Attempts:
-a guarded-recall prompt clause; a `supporting_evidence` field forcing the model
-to quote its source; status tagging (unrelated but adjacent). All failed because
-they ask the model to verify a match — and that verification is the broken
-faculty. The question also *presupposes* the role, and models accept user framing.
-
-**What would work:** extract the distinctive noun phrase from the question, check
-programmatically that it appears in a retrieved source, and force abstention when
-it does not. Deterministic comparison, not instruction. For context, MemConflict
-found the best conflict-recognition score across six production memory systems
-was 0.25 — this is hard industry-wide.
-
-## Addendum: correctness audit (before the next benchmark run)
-
-A full read of the memory pipeline, with each finding verified by a probe script
-rather than by inspection alone. Nine bugs were confirmed; one hypothesis was
-tested and **disproved** (BM25 dropping negative scores in `memory_store` — the
-`rank_bm25` library floors negative IDF internally, so that code was fine).
-
-### Retrieval was ranking on the wrong signal
-
-The re-ranking formula summed relevance, retention and importance with equal
-weight. Measured spans: relevance could move a score by **0.71**, importance by
-**0.90**, and retention sat at **~1.0 for every memory** because they had all just
-been written. So an important-but-unrelated memory outranked an exact match, and
-a superseded fact tied with the fact that replaced it. Relevance now leads, with
-importance and retention as tiebreakers (0.15 / 0.10) and a 0.30 penalty for
-superseded records.
-
-### The relevance floor never filtered anything
-
-The code read ChromaDB's cosine distance as if it spanned 0–2 in angular terms
-and computed `1 − distance/2`. ChromaDB's cosine distance is `1 − similarity`, so
-a completely unrelated memory (true similarity 0.0) scored **0.5** and sailed past
-the 0.3 floor. The effective cutoff was a similarity of −0.4 — nothing was ever
-excluded.
-
-Fixing the formula made the floor bite, so the threshold was **calibrated rather
-than guessed**, against real question/memory pairs:
-
-| Floor | Relevant kept | Irrelevant admitted |
-|---|---|---|
-| 0.00 | 12/12 | 47/72 |
-| **0.10** | **12/12** | **9/72** |
-| 0.25 | 9/12 | 1/72 |
-| 0.30 | 5/12 | 1/72 |
-
-The originally intended 0.30 would have discarded **7 of 12** genuinely relevant
-memories. `0.10` removes 81% of the noise at no recall cost. A question and the
-memory answering it can sit as low as 0.15 ("what am I allergic to?" against
-"user cannot eat shellfish") — lexically disjoint, so BM25 would not have saved it.
-
-### Deduplication silently rewrote facts
-
-The merged record was built without `status`, `keywords`, `context`, or `links`.
-Because `status` defaults to `happened`, **merging a planned appointment into a
-duplicate turned an intention into an event** — undoing the exact guarantee the
-status field was added to provide. This is a plausible cause of the unexplained
-doctor's-appointment *counting* failure, which fails with the evidence both stored
-and retrieved: an over-count is what you would expect if plans were being counted
-as visits. Dedup now clusters within `(kind, status)`, so an intention can never
-merge with an event, and the merged record inherits keywords, context and links.
-
-### Reconciliation could not see the fact it needed
-
-It compared each session against the **40 most recent** existing memories. On a
-haystack of hundreds, the older fact a new one contradicts was never in that
-window, so nothing beyond the last 40 could ever be superseded. It now selects
-the 40 most *semantically relevant* memories instead.
-
-### Sessions were being ingested out of chronological order
-
-**211 of 500 haystack questions (42%)** list their sessions out of date order, with
-a median displacement of 15 positions. Since the system treats later-ingested as
-newer, reconciliation was superseding **newer facts with older ones** — directly
-attacking the knowledge-update and temporal-reasoning categories. Fixed on both
-sides: the harness now ingests oldest-first, and reconciliation refuses any
-supersession where the incoming memory is dated *earlier* than the one it would
-replace (it links them instead). The second half matters for real users too, who
-mention past facts in present conversations.
-
-### The abstention guard was flagging phrases that were present
-
-`_normalise` turned punctuation into spaces without collapsing runs, so a source
-saying "Dr. Lee" became `dr__lee` while the question yielded `dr lee` — no match.
-The guard reported the phrase as unverified and the assistant abstained on
-information it actually held. Now normalised consistently, and padded so a phrase
-matches whole words only ("New York" no longer satisfied by "New Yorker").
-
-### Smaller confirmed defects
-
-| Bug | Effect |
+# Building a Memory Layer, and Measuring It on LongMemEval
+
+**Last updated:** 2026-08-14
+**Benchmark:** LongMemEval (arXiv 2410.10813), both the oracle and haystack settings
+**Models:** Qwen3-30B-A3B for all memory operations, DeepSeek-v3.2 for answering and judging
+**Final scores:** 26/30 (87%) on oracle, 26/30 (87%) on haystack
+
+---
+
+## 1. The short version
+
+We built a long-term memory layer for a chatbot — the component that decides what to
+remember from a conversation, how to store it, and what to pull back when a later
+question needs it. Then we measured it on LongMemEval, a public benchmark that hides
+questions inside long multi-session chat histories.
+
+The system started at 63% and finished at 87% on the same 30-question oracle sample,
+and reached the same 87% on the harder haystack setting where each question is buried
+in roughly 45 sessions of unrelated conversation.
+
+The useful part of that number is not the number. It is what the intermediate
+measurements revealed about *where* a memory system loses information. We instrumented
+every run to answer two questions per benchmark item: was the answer ever written into
+the store, and did retrieval actually surface it? That splits every failure into one of
+three buckets — the write path lost it, retrieval buried it, or the model had it and
+still got the answer wrong. Almost every improvement in this project came from reading
+that split rather than from tuning a score.
+
+Three findings shaped the final system:
+
+1. **Most early losses were in the write path, not retrieval.** The intuition that a
+   memory system lives or dies on search quality was wrong here. Facts were being
+   dropped at extraction time, silently truncated mid-response, or corrupted by
+   consolidation logic that turned plans into events.
+2. **Reasoning that can be done in code should not be handed to the model.** Counting
+   and date arithmetic failed persistently across every model we tried, in two opposite
+   ways (one model committed to wrong numbers, the other refused to commit at all).
+   Moving the arithmetic into Python fixed a whole category outright.
+3. **Some problems are model-selection problems wearing an engineering costume.**
+   Abstention — declining to answer when the memory genuinely is not there — resisted
+   seven rounds of prompt engineering and one deterministic guard, then largely resolved
+   itself when we changed which model writes the final answer.
+
+---
+
+## 2. What we tested
+
+### 2.1 The system under test
+
+A Python memory layer on top of ChromaDB (a local vector database — it stores text
+alongside numeric embeddings so you can search by meaning rather than by exact words).
+The pipeline has four parts.
+
+**The write path.** After a conversation session, one model call reads the transcript
+and extracts atomic facts. Each fact carries structured metadata: an importance score
+from 1 to 10, a date resolved to an absolute value (the extractor turns "last month"
+into a real date using the session's date, not today's), search keywords, a one-sentence
+context, a `status` field, and an `about_user` flag. Facts are written append-only —
+the hot path makes no judgment about whether a fact contradicts an existing one.
+
+A second cheap call then runs a **completeness pass**: it sees the same transcript
+*plus the list of facts just stored* and outputs only what the first pass missed. The
+reasoning behind it is in §5.1.
+
+**Consolidation, run at session end rather than inline.** This is the "sleep pass"
+(the pattern comes from Letta): all the expensive judgment happens here, with the whole
+session in view, and it holds exclusive authority to modify existing records. It does
+reconciliation (deciding whether a new fact supersedes an old one), deduplication,
+memory evolution (updating the context sentences of linked neighbours, from the A-Mem
+design), reflection (deriving higher-level insights when enough important facts
+accumulate), and a rewrite of the always-in-prompt core profile (the MemGPT pattern —
+a short summary of the user that is included in every prompt regardless of retrieval).
+
+**Retrieval.** Three independent searches run in parallel and their rankings are fused:
+vector similarity, BM25 keyword matching, and Personalized PageRank over a graph of
+links between related memories. The fused ranking is then re-scored, and the weights
+matter enough that they are worth stating explicitly (`memory/memory_store.py:20-30`):
+relevance leads, with importance weighted 0.15, Ebbinghaus retention weighted 0.10, and
+a 0.30 penalty applied to superseded records. Retention here means a forgetting curve —
+a memory's strength decays as `e^(−days/strength)` and the strength grows each time the
+memory is recalled. There is a minimum true cosine similarity of 0.10 to enter the
+ranking at all. The top 5 memories go to the answer prompt.
+
+Alongside distilled memories, raw conversational turns are archived verbatim to an
+**experience bank** and searched separately, so questions about what the assistant
+itself said in a past conversation can be answered from the record.
+
+**The aggregation path.** Questions asking for a number that no single memory states —
+"how many appointments in March", "how long have I been doing X" — bypass similarity
+search entirely and are answered by scanning the store and computing in Python. The
+design is in §5.4.
+
+Old memories are soft-deleted (a flag, `is_current=0`), never physically removed, so
+the history of a changing fact stays queryable.
+
+### 2.2 The benchmark
+
+LongMemEval embeds a question inside a synthetic chat history spread over many sessions
+and tests five distinct memory abilities. We ran both of its settings:
+
+- **Oracle** supplies only the sessions that actually contain the evidence. This
+  measures whether the pipeline can extract, update, and reason over what it saw, with
+  no needle-in-haystack difficulty. Median around 2 to 5 sessions per question.
+- **Haystack** (`_s`) supplies the full distractor set — a median of around 45 sessions
+  and hundreds of turns per question, roughly 115k tokens of history. This adds the
+  problem of finding the evidence among competing, superficially similar sessions.
+
+The six question types, and what each one actually probes:
+
+| Type | What it tests |
 |---|---|
-| PageRank ranked *every* node, including unreachable ones scoring ~1e-6 | Unrelated memories received rank-fusion credit |
-| `add_links` released its lock between read and write | Concurrent link additions silently lost one |
-| `max(session_ids)` used string ordering | `lme-0-9` treated as newer than `lme-0-11` |
-| Prompt built *inside* reconcile's `try` | A coding error would have been swallowed as "reconcile call failed", disabling reconciliation with no sign |
-| Vector query fetched a fixed 30 candidates before filtering | A store full of superseded memories returned almost nothing |
+| single-session-user | A fact the user stated once. The baseline case. |
+| single-session-assistant | Something the *assistant* said. Fails entirely unless assistant turns are stored. |
+| single-session-preference | An implicit preference that should shape a later answer, never asked about directly. |
+| multi-session | Combining or counting facts across several sessions. |
+| knowledge-update | A fact that changed. Requires knowing which version is current. |
+| temporal-reasoning | Dates, durations, and ordering. |
 
-### Performance
+A subset of questions are **abstention** variants (their ids end in `_abs`). These ask
+about something that was never discussed, often while presupposing it is true. They
+count as correct only when the system admits it does not know.
 
-| Change | Effect |
-|---|---|
-| Vectorised dedup clustering (one matmul, not a Python loop over every pair) | **~490x** on that stage; it cost ~2s per sleep pass at 600 memories |
-| Embeddings no longer fetched by the three stages that never used them | 384 floats per record per stage saved |
-| Write path batched into one embedding call and one upsert | Was one model round trip *per extracted fact* |
+We sampled 5 questions per type, deterministically (sorted by question id, first N per
+type), giving 30 questions per run. One run took a larger sample of 10 per type (60
+questions) to check that the smaller sample was not misleading us.
 
-### Extraction was silently truncated on rich sessions
+### 2.3 The internal suite
 
-Found in the logs of the first post-fix haystack run, which emitted
-`LM response was truncated due to exceeding max_tokens=2048` twice while
-ingesting 47 sessions. DSPy detects this (`finish_reason == "length"`) but only
-*warns* — so the write path stored a partially extracted session as though it
-were complete, losing every fact after the cut.
+Alongside the benchmark we keep a hand-written suite of 14 scenarios
+(`eval/scenarios.py`) covering single-hop recall, multi-hop reasoning, knowledge
+updates, temporal questions, exact-token recall, abstention, and counting. It costs
+pennies to run and catches regressions in minutes rather than hours. It exists because
+benchmark runs are slow and expensive, and because a benchmark score tells you *that*
+something regressed but not *what*. Its limitation is that it saturated at full marks
+early — which is precisely why LongMemEval was brought in.
 
-The cap was set from measurement rather than raised by feel: one extracted fact
-serialises to **~88 output tokens**, and benchmark sessions run to a median of
-**14k characters** (28k at the tail), so a fact-dense session yields 30+ facts and
-needs **~2,600–3,500 tokens**. The 2048 ceiling was below what a normal session
-requires. It is now 4096, and extraction *reads the truncation signal itself*
-and retries at 8192 rather than accepting a partial result — a fixed ceiling can
-always be exceeded, so the durable fix is detection, not a bigger number.
+---
 
-Verified end to end: forced to truncate at a 48-token cap, extraction escalated
-and recovered all 13 facts from a dense session; at the configured budget it does
-not truncate at all.
+## 3. How we tested
 
-### The ChromaDB telemetry race was never actually fixed
+### 3.1 The run
 
-It resurfaced mid-run as `sleep pass error: '<uuid>CollectionGetEvent0'`, failing
-an entire consolidation pass. The earlier fix — `anonymized_telemetry=False` —
-addressed the wrong layer: that setting only sets `posthog.disabled = True`,
-which suppresses the **network send**. The unsafe code still runs on every
-`get()`:
+`eval/run_longmemeval.py` runs each question end to end through the real production
+code path — no test doubles, no shortcuts around the memory layer:
+
+1. **Ingest.** Every session in the question's history is written through the real
+   write path, carrying its historical date so relative dates resolve correctly.
+   Sessions are sorted oldest-first before ingestion (see §5.2 — this was a bug fix,
+   not an incidental detail). Sessions ingest concurrently in batches because
+   extraction is append-only and order-independent; one sleep pass then reconciles
+   each batch, with the expensive core-profile rewrite deferred to the final batch.
+2. **Archive.** Each user/assistant exchange is written to the experience bank so
+   turn-level search can find it later.
+3. **Ask.** The question is asked as of its question date, through the same retrieval
+   and response path the chatbot uses.
+4. **Judge.** An LLM judge compares the answer to the gold answer, using an
+   abstention-aware rubric so that "I don't know" is scored correctly for `_abs`
+   questions and incorrectly everywhere else.
+
+Every question runs against a throwaway database in a temporary directory under its own
+user id, so runs cannot contaminate each other or any real memories. Results are written
+after every question, because these runs take hours and get interrupted.
+
+### 3.2 The instrument that mattered: loss attribution
+
+Scoring alone tells you nothing actionable. So each non-abstention question also runs
+two audits, each a separate LLM call asking "is the gold answer derivable from this
+material?":
+
+- **Store audit** — given *everything* the write path stored (all memory records, the
+  core profile, and the full transcript archive), is the answer derivable?
+- **Retrieval audit** — given only what retrieval actually surfaced for this question
+  (top-5 memories, matched transcript turns, core profile), is the answer derivable?
+
+From the two answers plus correctness, every failure gets a stage
+(`eval/run_longmemeval.py:245-254`):
+
+| Stage | Meaning | Whose problem |
+|---|---|---|
+| write-path loss | The answer was never stored | Extraction or consolidation |
+| retrieval loss | Stored, but not surfaced | Ranking, filtering, search |
+| reasoning loss | Surfaced, and still answered wrong | The answering model |
+
+This is the single most valuable thing we built for this project. It converts "the
+score went down" into "extraction dropped three facts", which is a fixable statement.
+Its limits are documented honestly in §6.1 — it is a noisy instrument at haystack
+scale, and we can prove it.
+
+---
+
+## 4. Results
+
+### 4.1 Final runs — everything active
+
+Both runs used the full stack for the first time together: split models, the
+aggregation path, the extraction completeness pass, and every correctness fix in §5.
+
+| Question type | Oracle 30 | Haystack 30 |
+|---|---:|---:|
+| single-session-user | 5/5 | 4/5 |
+| single-session-assistant | 4/5 | 5/5 |
+| single-session-preference | 4/5 | 4/5 |
+| multi-session | 3/5 | 3/5 |
+| knowledge-update | 5/5 | 5/5 |
+| temporal-reasoning | 5/5 | 5/5 |
+| *(abstention subset)* | *2/2* | *2/2* |
+| **Total** | **26/30 (87%)** | **26/30 (87%)** |
+
+Files: `eval/results/longmemeval-16-oracle30-gap-check.json` and
+`longmemeval-17-haystack30-gap-check-MERGED.json`.
+
+Two results here are worth more than the headline:
+
+**Haystack matched oracle.** Finding the needle among 45 sessions of distractors is no
+longer what limits this system. Earlier in the project, haystack scored well below
+oracle; the retrieval fixes in §5.3 closed that gap. Whatever is still failing fails
+for reasons unrelated to search difficulty.
+
+**Temporal reasoning went from the worst category to perfect.** On the 60-question
+oracle run it scored 4/10, and six of those failures were the model declining to do
+date arithmetic it had the dates for. The aggregation path erased that category of
+failure completely — 5/5 in both final runs.
+
+The aggregation path fired on 10 of 30 oracle questions and 7 of 30 haystack questions.
+It emits nothing when it cannot compute an answer, so the remaining questions took the
+normal path unchanged.
+
+### 4.2 Trajectory
+
+| Run | Setting | Score | What changed |
+|---|---|---:|---|
+| `longmemeval-01` | Oracle 30 | 19/30 (63%) | Baseline: per-fact write path, temperature 0.7 |
+| `longmemeval-03` | Oracle 30 | 24/30 (80%) | Thin write path, sleep pass, transcript recall, temperature 0 |
+| `longmemeval-08` | Haystack 6 | 5/6 | First haystack pilot (tiny sample) |
+| `longmemeval-11` | Haystack 10 | 5/10 (50%) | Two hardest types only, after the correctness audit |
+| `longmemeval-12` | Oracle 60 | 44/60 (73%) | Split models (Qwen memory, DeepSeek answers) |
+| `longmemeval-13` | Haystack 30 | 23/30 (77%) | Same configuration, haystack |
+| `longmemeval-16` | Oracle 30 | **26/30 (87%)** | Aggregation path + completeness pass |
+| `longmemeval-17` | Haystack 30 | **26/30 (87%)** | Same |
+
+The dip at 73% is not a regression — it is a 60-question sample of a harder mix, and the
+50% run deliberately tested only the two weakest categories. Scores are only comparable
+within the same sample and setting. The full run-by-run index, including the internal
+suite, lives in `eval/results/README.md`.
+
+Abstention deserves its own line because it moved the most: historically near zero, then
+7 out of 8 across the split-model runs, then 4 out of 4 in the two final runs.
+
+### 4.3 The remaining failures, all four of them
+
+Eight failing instances across the two runs, covering six distinct questions. Every one
+is diagnosed; no new failure mode appeared in either final run.
+
+| Question | Setting | Stage | What happened |
+|---|---|---|---|
+| Doctor's appointments in March (`00ca467f`) | Both | write-path | Gold is 2. Oracle answered 1 (had Dr. Thompson, missed the Dr. Smith visit); haystack answered 1 (had Smith, missed Thompson). *Opposite* facts missing on the two runs — this is extraction variance, §6.2. |
+| Battery-life preference (`09d032c9`) | Both | write-path | The user had earlier mentioned buying a power bank; the correct behaviour is to build on that. It was never stored on either run. Same variance. |
+| Coffee mug price (`0100672e`) | Haystack | write-path | Gold is $12. The system had the $60 total but not the count of mugs, so it correctly declined to divide. |
+| Leadership percentage (`099778bb`) | Oracle | retrieval | The store held "20 leadership positions"; the model needed the total to compute a percentage and asked for it. Stored but not surfaced. |
+| Chess move (`1568498a`) | Oracle | reasoning | Gold is "28. Kg3". Answered "28. Kg3 Be6" — correct move plus an extra ply, judged wrong. Evidence fully delivered. |
+| Vintage cameras (`15745da0`) | Haystack | reasoning | Gold is three months. Answered "about 16 days" by anchoring on the most recent camera rather than the first. Evidence fully delivered. |
+
+The pattern: two questions fail because of extraction variance, one because a needed
+component genuinely was not stated, one because retrieval buried a fact, and two because
+the model mishandled evidence it had in front of it. Notably, the same two questions
+(doctor and battery) fail in *both* settings, which tells us the difficulty is in
+reading the source conversation, not in the size of the haystack.
+
+---
+
+## 5. What we understood, and what we changed
+
+This section is organised by cause rather than by date, because the chronology is
+misleading — several fixes were made before we understood why they worked.
+
+### 5.1 The write path was losing facts, in five distinct ways
+
+This was the largest and most surprising source of loss. We had assumed retrieval would
+be the bottleneck.
+
+**Extraction was being silently truncated.** Found in the logs of a haystack run, which
+emitted `LM response was truncated due to exceeding max_tokens=2048` twice while
+ingesting 47 sessions. DSPy detects this condition (the API reports `finish_reason ==
+"length"`) but only *warns* — so the write path stored a partially extracted session as
+though it were complete, losing every fact after the cut.
+
+The cap was then set from measurement rather than raised by feel: one extracted fact
+serialises to roughly 88 output tokens, and benchmark sessions run to a median of 14,000
+characters (28,000 at the tail), so a fact-dense session yields 30 or more facts and
+needs somewhere between 2,600 and 3,500 tokens. The 2048 ceiling was below what a normal
+session requires. It is now 4096, and — more importantly — extraction *reads the
+truncation signal itself* and retries at 8192 rather than accepting a partial result
+(`memory/llm.py:45-56`). A fixed ceiling can always be exceeded, so the durable fix is
+detection, not a bigger number. Verified end to end: forced to truncate at a 48-token
+cap, extraction escalated and recovered all 13 facts from a dense session.
+
+**Pre-1970 dates crashed the whole session's write.** `datetime.timestamp()` raises
+`[Errno 22]` on Windows for dates before 1970, so a single childhood memory killed
+every write in that session. `to_epoch()` now subtracts from the epoch instead.
+
+**A ChromaDB telemetry race dropped sessions — and our first fix was wrong.** Concurrent
+ingestion was losing around 14% of sessions to an opaque event-key error. We set
+`anonymized_telemetry=False` and considered it fixed. It resurfaced mid-run and failed
+an entire consolidation pass. The setting only sets `posthog.disabled = True`, which
+suppresses the network *send*; the unsafe code still runs on every read:
 
 ```python
 # chromadb/telemetry/product/posthog.py — no lock anywhere
@@ -400,217 +313,471 @@ if batched_event.batch_size >= batched_event.max_batch_size:
     del self.batched_events[batch_key]      # two threads both reach this
 ```
 
-`CollectionGetEvent` batches up to 300 events, so under concurrent reads two
-threads pass the size check together and the second `del` raises `KeyError`.
+Under concurrent reads two threads pass the size check together and the second delete
+raises `KeyError`. Reproduced deterministically: 17 failures in 1280 concurrent `get()`
+calls (1.3%) with the setting already applied, and zero once the capture path is
+neutralised. Verified again through the real read paths under the same concurrency shape
+the sleep pass uses. The lesson generalises: **a config flag that sounds like it disables
+a subsystem may only disable its output.**
 
-Reproduced deterministically: **17 failures in 1280 concurrent `get()` calls
-(1.3%)** with the setting already applied, and **zero** once the capture path is
-neutralised. Verified again through the real `memory_store` read paths under the
-same concurrency shape `sleep_pass` uses: 60 batches, no errors.
+**Assistant turns were never stored at all.** In the baseline the extractor produced
+facts about the *user* only, so any question about what the assistant had said failed by
+construction — the worst category at 40%. Raw exchanges are now archived to the
+experience bank and searched with BM25 alongside memories. That surfaced a second bug:
+BM25's inverse-document-frequency term goes negative when a word appears in most of a
+small corpus, so the `score > 0` filter discarded every candidate on short histories.
+Turn search now ranks by BM25 but gates on non-stopword overlap. A third problem sat on
+top of both: excerpts shared the same prompt field as memories, so the model treated
+verbatim transcript as a vague recollection and answered "I don't have the list" while
+the list sat in its context. They now occupy a separate `past_conversations` field
+framed as a record to quote from. Single-session-assistant went from 0/3 to 3/3 on the
+targeted retest, and 5/5 on the final haystack run.
 
-The lesson is the one this codebase keeps re-learning — a config flag that
-*sounds* like it disables a subsystem may only disable its output.
+**Extraction is nondeterministic even at temperature 0 — and that is now the ceiling.**
+This was the last thing we understood and the most important. The doctor question failed
+two separate retests with *opposite* facts missing: one run stored Dr. Thompson but not
+the bronchitis visit, the next stored Dr. Smith but not Thompson. Same code, same input,
+same temperature.
 
-### Abstention: the guard is right, the model ignores it
+The fix is a **completeness pass** (`memory/update_memory.py: _completeness_pass`,
+calling `extract_memory.py: MemoryGapCheck`). After the first extraction stores its
+facts, one more cheap call sees the same transcript plus the list of facts just stored,
+and outputs only what is missing. The intuition: a second independent sample would just
+re-roll the same lottery, but a pass *conditioned on the first pass's output* samples
+from a different distribution — one centred on the gaps.
 
-`031748ae_abs` failed again. The deterministic guard **worked correctly** — checked
-against the run's real retrieved sources, `unverified_terms` returned
-`['Software Engineer Manager']`, exactly as designed. The model received that
-warning, corrected the role to "Senior Software Engineer" in its answer, and then
-**answered anyway** with a number instead of declining.
+Two guards keep it safe. Re-emitted paraphrases (the model restates a stored fact
+despite instructions) are dropped before writing by embedding similarity at 0.9, which
+is the same threshold the sleep pass uses to merge duplicates — so anything the guard
+admits would have survived deduplication anyway. And the pass is best-effort: any
+failure logs a warning and leaves the first pass's writes untouched.
 
-So detection is solved; compliance is not. The guard is advisory, and the model
-treats a strong, directly-relevant memory ("leading a team of five engineers as a
-Senior Software Engineer") as licence to answer. Making abstention reliable means
-enforcing it in code rather than instructing it — with a real false-positive cost
-that needs its own calibration before adopting. Note this question *passed* in an
-earlier run with the same guard and model, so run-to-run store variation, not a
-regression, separates the two outcomes.
+Verified fully offline, with no benchmark spend, by replaying the archived transcripts
+of the failing doctor question against a copy of that run's store. The gap check ran on
+the three doctor-adjacent sessions, recovered 11 facts including the one that mattered
+(Dr. Thompson's March 20 follow-up), and the aggregation path then computed the gold
+answer of 2, where the live run had answered 1. Cost: one extra cheap-model call per
+session, roughly doubling write-path spend, which is still pennies per question.
 
-### Re-told events were being superseded
+It narrows the hole. It does not close it — the doctor and battery questions still fail,
+and the probability that every needed fact survives extraction remains a probability
+rather than a guarantee.
 
-Found by comparing the doctor's-appointment answer across runs: it degraded from
-"1 appointment" to "0 — you have appointments *scheduled*" on the clean run.
-The store explained it: the March 20 appointment — an event that genuinely
-happened — was marked `is_current=0`, so the model saw it tagged
-`[OLD/SUPERSEDED]` and discounted it.
+### 5.2 The store was quietly lying about what happened
 
-The cause is a category error in reconciliation: supersession models *mutable
-state* ("lives in Mumbai" → "moved to Bengaluru"), but a **completed event can
-never become outdated**. When a later session re-mentions the same appointment,
-the reconciler treated the re-mention as replacing the original, hiding a real
-event behind an [OLD] tag. Reconciliation now refuses to supersede when both
-memories are `happened` events on the same day — it links them and lets dedup
-merge. Verified: the re-told appointment stays current; a genuine move between
-cities still supersedes; an event still supersedes the plan it fulfils.
+A separate class of bug: the facts were stored, but consolidation corrupted their
+meaning. These are worse than losses, because the system answers confidently from
+corrupted state.
 
-### Failure taxonomy across all runs (cross-run audit, no LLM calls)
+**Intentions were being recorded as events.** A haystack question asked how many
+doctor's appointments the user attended in March; the answer was 3 against a gold of 2.
+The cause was not counting — the history mixes attended, scheduled, and merely-considered
+appointments ("I'm *considering* scheduling with Dr. Patel", "I'm *scheduled* for an EMG
+on April 1st"), and extraction flattened all of them into completed facts. The count was
+wrong before any counting happened.
 
-Latest-run status of every question that ever failed, from
-`eval/results/*.json`:
+The fix is a `status` field on every memory (`happened`, `planned`, `considered`,
+`ongoing`), asserted in the fact text as well ("User is considering X"), persisted, and
+surfaced at answer time as a tag like `[PLANNED, did not happen]`. Beyond benchmarks,
+the old behaviour told users they had attended appointments they had only thought about.
 
-| Question | Verdict | Layer |
+**Deduplication then undid that guarantee.** The merged record was built without
+`status`, `keywords`, `context`, or `links`. Because `status` defaults to `happened`,
+merging a planned appointment into a duplicate turned an intention back into an event.
+Deduplication now clusters within `(kind, status)`, so an intention can never merge with
+an event, and the merged record inherits the missing fields.
+
+**Completed events were being superseded by re-tellings.** Supersession is designed for
+*mutable state* — "lives in Mumbai" is replaced by "moved to Bengaluru". But a completed
+event can never become outdated. When a later session re-mentioned the March 20
+appointment, the reconciler treated the re-mention as replacing the original, so a real
+event was hidden behind an `[OLD/SUPERSEDED]` tag and the model discounted it.
+Reconciliation now refuses to supersede when both memories are `happened` events on the
+same day; it links them and lets deduplication merge. Verified three ways: the re-told
+appointment stays current, a genuine move between cities still supersedes, and an event
+still supersedes the plan it fulfils.
+
+**Sessions were being ingested out of chronological order.** 211 of the 500 haystack
+questions (42%) list their sessions out of date order, with a median displacement of 15
+positions. Since the system treats later-ingested as newer, reconciliation was
+superseding *newer* facts with older ones — attacking exactly the knowledge-update and
+temporal-reasoning categories. Fixed on both sides: the harness ingests oldest-first,
+and reconciliation refuses any supersession where the incoming memory is dated earlier
+than the one it would replace, linking them instead. The second half matters for real
+users too, who mention past facts in present conversations.
+
+**A growing quantity was being merged into a hedge.** The store literally contained
+"User has completed **4 to 5** painting projects" — deduplication had clustered
+"completed 4 projects" (older) with "completed 5 projects" (newer) and the merge
+faithfully preserved both. A quantity that grows over time is a knowledge update, not a
+duplicate. Conflicting numbers in a cluster now resolve to the newest statement with the
+history linked, with no LLM call; equal-number and numberless duplicates still merge.
+
+**General knowledge was polluting the store.** The appointment question's top retrieved
+memories included Wudhu rules, George Washington's birth year, and hiking-gear advice —
+assistant answers stored as if they were facts about the user, eating retrieval slots the
+real evidence needed. Extraction now emits an `about_user` flag per fact and the write
+path filters on it. Verified directly: the Washington trivia and gear advice are dropped,
+the user's own appointment and trip are kept.
+
+**Reconciliation could not see the fact it needed to.** It compared each session against
+the 40 *most recent* existing memories. On a haystack of hundreds, the older fact that a
+new one contradicts was never in that window, so nothing beyond the last 40 could ever
+be superseded. It now selects the 40 most semantically *relevant* memories instead.
+
+### 5.3 Retrieval was ranking on the wrong signal, and its filter never filtered
+
+**The relevance floor was inert.** The code read ChromaDB's cosine distance as if it
+spanned 0 to 2 in angular terms and computed `1 − distance/2`. ChromaDB's cosine
+distance is `1 − similarity`, so a completely unrelated memory (true similarity 0.0)
+scored 0.5 and sailed past the 0.3 floor. The effective cutoff was a similarity of −0.4:
+nothing was ever excluded.
+
+Fixing the formula made the floor bite, so the threshold was **calibrated rather than
+guessed**, against real question and memory pairs:
+
+| Floor | Relevant kept | Irrelevant admitted |
 |---|---|---|
-| `031748ae_abs` (abstention) | Guard detects correctly; model answers anyway | **Model compliance** — needs enforcement in code, has a false-positive cost |
-| `00ca467f` (count appointments) | Mixed: [OLD] tag bug (fixed above) + model not counting "diagnosed by Dr. Smith" as an appointment | **Part memory (fixed), part model** |
-| `0bc8ad93` (museum, "did I go alone?") | Extraction never stored the *absence* detail (went alone) | **Model extraction judgment**; last tested three runs ago |
-| `09d032c9` (battery preference) | Preference not stored on one run, passed on another | **Flaky extraction**; last tested three runs ago |
-| 8 other questions | Failed in early runs, pass in their latest run | Fixed by earlier work |
+| 0.00 | 12/12 | 47/72 |
+| **0.10** | **12/12** | **9/72** |
+| 0.25 | 9/12 | 1/72 |
+| 0.30 | 5/12 | 1/72 |
 
-Loss-stage totals (latest run per question, non-abstention): **25 pass, 1
-reasoning loss, 2 write-path loss** — both write-path losses are from the
-old pipeline and untested since. Internal-suite blips (12/13 twice) never
-reproduced; both were one-off judge/model variance.
+The originally intended 0.30 would have discarded 7 of 12 genuinely relevant memories.
+0.10 removes 81% of the noise at no cost to recall. A question and the memory that
+answers it can sit as low as 0.15 — "what am I allergic to?" against "user cannot eat
+shellfish" — which are lexically disjoint, so BM25 would not have rescued that one
+either.
 
-### Open design tension: guarded recall vs. aggregation questions
+**Importance was outranking relevance.** The re-ranking formula summed relevance,
+retention, and importance with equal weight. We measured the span each term could
+actually move a score: relevance 0.71, importance 0.90, and retention sat at
+approximately 1.0 for *every* memory, because they had all just been written. So an
+important-but-unrelated memory could outrank an exact match, and a superseded fact could
+tie with the fact that replaced it. Relevance now leads, with importance and retention
+demoted to tiebreakers at 0.15 and 0.10, and a 0.30 penalty for superseded records.
 
-With the event guard in place, the doctor's-appointment question failed a third
-way: the model now says "I don't have a record of how many appointments you
-attended" — over-abstaining rather than over-counting. The likely mechanism is
-the guarded-recall rule itself: the prompt requires quoting exact source words
-that *state* what was asked, and declining when nothing does. No memory literally
-states a count; a count must be **derived** from several memories. The same
-discipline that fixed the hallucination failures taxes aggregation questions.
+**Smaller confirmed defects, each verified by a probe rather than by inspection:**
 
-Across three runs this question failed three different ways (over-count →
-miscount via a false [OLD] tag → over-abstain). Each time the memory layer's
-contribution shrank; the model's remained. Any fix means loosening quote-or-
-decline for derivational questions without re-opening the abstention hole — a
-deliberate, separately-tested change, not a quick edit.
+| Bug | Effect |
+|---|---|
+| PageRank ranked *every* node, including unreachable ones scoring ~1e-6 | Unrelated memories received rank-fusion credit |
+| `add_links` released its lock between read and write | Concurrent link additions silently lost one |
+| `max(session_ids)` used string ordering | `lme-0-9` was treated as newer than `lme-0-11` |
+| The prompt was built *inside* reconcile's `try` block | A coding error would have been swallowed as "reconcile call failed", disabling reconciliation with no visible sign |
+| The vector query fetched a fixed 30 candidates before filtering | A store full of superseded memories returned almost nothing |
 
-### Caveat on the next benchmark
+One hypothesis in this area was tested and **disproved**: we suspected BM25 was dropping
+negative scores inside `memory_store` as well, but the `rank_bm25` library floors
+negative inverse-document-frequency internally, so that code was fine. Worth recording —
+a probe that kills a hypothesis is as useful as one that confirms it.
 
-These changes alter retrieval ranking, so scores are **not** directly comparable to
-the earlier 80% / 83% runs — that is a re-baseline, not a regression if it moves.
-`top_k` remains at 5 and is untouched deliberately: it is a tuning knob rather
-than a bug, and changing it in the same run would confound the comparison.
+### 5.4 Arithmetic belongs in code, not in the model
 
-## Addendum: final batch-1 result with every fix active
+The most valuable single change, and the one that generalises furthest.
 
-`longmemeval-11-batch1-all-fixes.json`: **5/10 (50%)** — knowledge-update 2/5,
-multi-session 3/5, abstention 0/1. Loss attribution: **store 9/9, retrieval
-9/9, all four non-abstention failures are reasoning loss.** For the first time
-no question was lost in the write path or retrieval — every failure happened
-with the evidence in front of the model.
+**The problem, stated precisely.** Questions asking for a number that no memory states
+failed through two different models in two characteristic ways. Qwen committed to wrong
+numbers (counting a plan as a visit). DeepSeek refused to commit — "I don't have the
+exact dates recorded", with the dates sitting in its context, and on one question it
+computed both candidate answers including the correct one and then declined to choose.
 
-The failures are two enumeration questions (counting events; all pure
-arithmetic questions passed), one store-baked hedge ("4 to 5 projects" — see
-the merge-of-progressions finding), the abstention question (guard fired,
-model answered anyway — 1-for-7 compliance across all runs), and one
-world-knowledge override (model answered train-vs-taxi from real Tokyo prices
-instead of the user's stored $50 delta).
+The root cause is structural rather than model-specific. Two jobs were being fused into
+a single generation: *deciding which memories belong to the category*, and *doing
+arithmetic over them*. Similarity search compounds it, because top-k retrieval cannot
+promise it surfaced **all** members of a category — and a model that suspects its list
+is incomplete is right to hedge.
 
-Context for the 50%: this batch is deliberately the two hardest categories;
-Zep+GPT-4o reports ~71% on the full mix with multi-session weakest. One
-question (031748ae_abs) ingested through a ~1-minute OpenRouter outage that
-dropped ~6 sessions; a store inspection confirmed the near-match evidence
-survived, so its result stands.
+**The design in one sentence:** detect number-deriving questions cheaply, collect
+candidates by scanning the whole store instead of searching it, let one small LLM call
+do membership judgment only, do the arithmetic in Python, and hand the responder a
+computed answer that it reports rather than derives. Decomposition is the whole trick —
+classify-then-count replaces classify-and-count, and each piece goes to the component
+that is reliable at it. Implemented in `memory/aggregate.py`.
 
-Where the project goes from here — the gap analysis and prioritized roadmap —
-lives in **`blackboard.md`**.
+The four stages:
 
-## Addendum: split-model runs — oracle-60 and haystack-30 (2026-08-13)
+1. **Trigger — deterministic and free.** A small family of regular expressions on the
+   question: "how many *noun*" means COUNT; "how long", "days between", "did it take"
+   mean DATE-DIFF. False positives are harmless by construction, because if the later
+   stages find nothing the aggregate is empty and the system behaves exactly as before.
+   The trigger only decides whether to *try*.
+2. **Collect — a scan, not a search.** Fetch all current records for the user (a few
+   hundred even at haystack scale, all local, no API cost), then filter deterministically
+   in code: by `status`, so "did I go to" counts only `happened` records and the April 1
+   EMG can never be a candidate; and by date window, so "in March" becomes a range filter
+   on the stored ISO date. Year ambiguity resolves by a fixed rule, and if ambiguity
+   survives the path emits nothing rather than guessing a window.
+3. **Select — one small call, membership only.** The surviving candidates (typically 40
+   or fewer) go to a single call asking which of them describe the category in question,
+   answered by index. This is where "diagnosed with bronchitis by Dr. Smith at a clinic
+   visit" gets recognised as a doctor's appointment. Per-item classification is something
+   small models do reliably; it was the *simultaneous* classify-and-count they failed.
+   For date questions the same call labels the start and end anchors instead, and code
+   reads their stored dates — which are already absolute, because extraction resolves
+   relative dates at write time.
+4. **Compute and deliver.** Python does the arithmetic and the responder receives a
+   separate `computed_aggregate` field with the members listed, the exclusions named, and
+   the answer basis stated, plus one instruction: this was produced by scanning all
+   memories and computing in code, so state its number. The model no longer chooses a
+   number; it reports one. The member list keeps the result explainable and auditable.
 
-Configuration: Qwen3-30B-A3B on the memory pipeline, DeepSeek-3.2 on the answer
-path (`MEMORY_CHAT_MODEL`), chosen after a five-mode reasoning gauntlet where
-DeepSeek uniquely flagged a false premise in every hard-abstention trial.
+Scope was kept deliberately narrow: COUNT and DATE-DIFF only. Those two cover nine of
+the observed failures. General amount arithmetic (the coffee-mug division, which needs a
+total and a divisor labelled from different memories) was left out as a separate failure
+family with exactly one observed instance. We explicitly did not build a general query
+engine over memories or a learned question classifier.
 
-**Oracle 60 (10/type): 44/60 (73%).** Four types at 80–90%; multi-session 60%;
-temporal-reasoning 40% — six of ten temporal failures are date-arithmetic the
-model declines to perform ("I don't have the exact dates recorded" with the
-dates retrieved). Abstention subset 5/6.
+**Measured result.** All three date-difference questions with stored anchors flipped from
+fail to pass — the exact questions DeepSeek had previously declined. A fourth question
+exposed a modality gap ("need to pick up" counts `planned` records, not events), which
+was fixed and verified by replaying the run's own store, where it computes the gold count
+exactly. Temporal reasoning went from 4/10 on the oracle-60 run to 5/5 on both final
+runs. Where anchors were genuinely never stored, the aggregate correctly emitted nothing.
 
-**Haystack 30 (5/type): 23/30 (77%).** Haystack now out-scores oracle —
-needle-finding at ~45 sessions/question is no longer the bottleneck. On the two
-hard types the previous batch scored 5/10; this run scored 7/10. Abstention 2/2,
-including a textbook near-match decline ("no record of a hamster; I know about
-your cat Luna"). All seven failures are previously-diagnosed items; none new.
+### 5.5 Abstention: an engineering problem that turned out to be a model problem
 
-**The model-swap ledger.** Gained: abstention 7/8 across both runs (historically
-~0), grounding on stored numbers. Lost: commitment on derived numbers — the
-coffee-mug answer computed both candidates including the correct one and refused
-to choose; three date-arithmetic questions declined outright; one verbatim-recall
-regression (chess, both settings). Net: wrong-commitments became non-commitments.
-Caveat: the audit judge is also DeepSeek now, and it labels derived-number
-questions "not in store" more strictly — the write-path column is partly a
-measurement change.
+One question runs through this entire project. Asked "how many engineers do I lead in my
+new role as **Software Engineer Manager**" when memory only records **Senior Software
+Engineer**, the system should decline. The question also *presupposes* the role, and
+models tend to accept user framing.
 
-**Conclusion.** The aggregation path (counts and date-diffs computed in code,
-handed to the model as committed numbers) now addresses the majority of all
-remaining failures in both settings — promoted to the top of the roadmap in
-`blackboard.md`.
+What we tried, in order, and what each attempt taught us:
 
-## Addendum: the aggregation path, built and measured (2026-08-13)
+1. **A guarded-recall prompt clause** — answer only from what a memory actually states.
+   Failed.
+2. **A `supporting_evidence` output field** forcing the model to quote its source before
+   answering. Failed: the model quoted a near-match and answered anyway.
+3. **A deterministic guard** (`memory/grounding.py`) that extracts distinctive noun
+   phrases from the question and checks programmatically whether they appear in any
+   retrieved source. This *worked as designed* — it returned
+   `unverified_terms = ['Software Engineer Manager']`, exactly right. The model received
+   the warning, corrected the role in its answer, and then **answered anyway** with a
+   number. Detection was solved; compliance was not. Final tally across all runs: the
+   guard detected the fabricated premise 7 times out of 7, and the model obeyed it 1 time
+   out of 7.
 
-`memory/aggregate.py` implements `design-aggregation.md`: count and time-span
-questions are answered by a full-store scan (status/date filters in code), one
-membership-only LLM call, and arithmetic in Python, delivered to the responder
-as a computed basis it reports instead of derives. Internal suite 14/14,
-including a new counting scenario with a booked-but-unattended trap.
+   Building the guard did surface a real bug worth keeping: its text normaliser turned
+   punctuation into spaces without collapsing runs, so a source saying "Dr. Lee" became
+   `dr__lee` while the question yielded `dr lee`, and no match was found. The system
+   abstained on information it actually held. Normalisation is now consistent, and
+   phrases are padded so they match whole words only — "New York" is no longer satisfied
+   by "New Yorker".
 
-Targeted retest of the 10 aggregation-shaped benchmark failures
-(`longmemeval-14/-15`): **all 3 date-diffs with stored anchors flipped to
-PASS** — the exact questions DeepSeek previously declined. A fourth (counting
-pending obligations) exposed a modality gap — "need to pick up" counts
-`planned` records, not events — fixed and verified by replaying the run's own
-store (computes the gold count exactly). Where anchors were genuinely never
-stored the aggregate correctly emitted nothing.
+4. **Changing the answering model.** DeepSeek-v3.2 on the answer path, chosen after a
+   five-mode reasoning gauntlet in which it uniquely flagged the false premise in every
+   hard-abstention trial. Abstention went from historically near-zero to 7/8 across the
+   two split-model runs and 4/4 in the final pair, including a textbook near-match
+   decline: "no record of a hamster; I know about your cat Luna."
 
-**The revealed bottleneck: extraction completeness.** Every remaining failure
-traces to facts that were not stored on that particular run — the doctor
-question failed both retests with *opposite* missing facts (one run stored
-Dr. Thompson but not the bronchitis visit; the other stored Dr. Smith but not
-Thompson). Extraction is nondeterministic run to run even at temperature 0.
-With reasoning moved into code and retrieval at 9/9, P(every needed fact
-survives extraction) is now the system's ceiling — promoted to the top of
-`blackboard.md`, with the experience bank (re-extraction from archived raw
-transcripts) as the designed lever.
+The conclusion we drew: three rounds of instruction could not make a model verify a match
+when *verification itself* was the broken faculty. Code-enforced abstention (declining in
+the response layer without asking the model) remains designed but unbuilt, shelved
+because it carries a real false-positive cost that would need its own calibration and
+the model swap made it unnecessary. For industry context, the MemConflict benchmark
+found the best conflict-recognition score across six production memory systems was 0.25.
 
-## Addendum: the extraction gap check, built and verified offline (2026-08-13)
+### 5.6 The model-swap ledger, and what it cost
 
-The completeness lever from `blackboard.md` item 5 is now in the write path.
-After the first extraction stores its facts, `update_memory.py:
-_completeness_pass` makes one more cheap-model call
-(`extract_memory.py: MemoryGapCheck`) that sees the same transcript *plus the
-list of facts just stored* and outputs only what is missing. The intuition:
-extraction is nondeterministic — the same session yields different fact subsets
-run to run — but a pass conditioned on the first pass's output is sampling from
-a different distribution, one centred on the gaps.
+Splitting the models — Qwen3-30B-A3B for the hundreds of memory operations, DeepSeek-v3.2
+for the single answer call per question — is cheap by construction, because the answer
+path is one call against hundreds of ingestion calls.
 
-Two guards keep it safe. Re-emitted paraphrases (the model restates stored
-facts despite instructions) are dropped before writing by embedding similarity
-at 0.9 — the same threshold the sleep pass uses to merge duplicates, so
-anything the guard admits would have survived dedup anyway. And the pass is
-best-effort: any failure logs a warning and leaves the first pass's writes
-untouched.
+It was not free of regressions, and the ledger is worth stating honestly:
 
-**Verification, fully offline** (no benchmark spend): replayed the archived
-experience-bank transcripts of the doctor question (`00ca467f` — failed both
-aggregation retests with opposite missing facts) against a copy of that run's
-store. The gap check ran on the three doctor-adjacent sessions, recovered 11
-facts including the one that mattered — Dr. Thompson's March 20 follow-up —
-and the aggregation path then computed the gold answer: count = 2, where the
-live run had answered 1. The membership call also correctly collapsed a
-near-duplicate Dr. Smith record the similarity guard had admitted, so the
-layered defenses (insert-time guard, sleep-pass dedup, membership dedup) each
-caught what the previous layer let through.
+- **Gained:** abstention (near-zero to 7/8), and much better grounding on numbers that
+  are actually stored.
+- **Lost:** commitment on *derived* numbers. The coffee-mug answer computed both
+  candidates including the correct one and refused to choose; three date-arithmetic
+  questions were declined outright. In effect, wrong commitments became non-commitments.
+- **Then recovered:** the aggregation path in §5.4 was built specifically to close that
+  new gap, and did.
 
-Internal suite with the pass active on every session: **14/14**
-(`internal-14-gap-check.json`). Cost: one extra Qwen-30B call per session,
-roughly doubling write-path spend — still pennies per benchmark question.
+### 5.7 Things we tried that did not work
 
-## Reproduce
+Recorded so they are not retried:
 
-```bash
-python eval/run_longmemeval.py --per-type 5 --out my-run.json   # oracle, 30 questions
-python eval/run_longmemeval.py --types temporal-reasoning,knowledge-update
-python eval/run_longmemeval.py --haystack --per-type 1 --sleep-every 5   # ~48 sessions/question
-python eval/run_eval.py                                          # internal 13-question harness
-```
+- **Compose-on-read** (generating a query-tailored digest of memories at read time): no
+  accuracy gain, added latency, and blurred fact attribution in one case. Disabled.
+- **Personalized PageRank**: no measurable accuracy difference, but it costs no LLM
+  calls, so it stayed on.
+- **gpt-oss-120b and gpt-oss-20b** as cheaper extraction models: 120b was 2.5 times
+  slower than Qwen despite roughly half the sticker price, and 20b failed to produce
+  parseable output at all. Both are reasoning models — they spend the token budget on
+  chain-of-thought before emitting structured output, hit the token cap, and get
+  truncated. OpenRouter bills reasoning tokens as completion tokens, so the cheaper price
+  is partly illusory. **Cheaper per token is not cheaper for this workload.**
+- **Trimming the extraction schema** for speed: caused a silent quality regression the
+  internal suite caught — "pilot with Indigo" became "pilot", because the terseness
+  instruction had bled from the search fields into the fact text. Fixed by scoping
+  terseness explicitly and requiring names, employers, and numbers to survive. Timing
+  measurements would never have caught this; the regression suite did.
 
-Results land in `eval/results/`; datasets live in `eval/data/` (gitignored — download
-from the `xiaowu0162/longmemeval-cleaned` HuggingFace repo).
+### 5.8 Performance work
+
+Profiling one full haystack question (51 sessions) showed it was essentially **100% LLM
+latency** — all local work, including embeddings, ChromaDB, and an O(n²) deduplication
+comparison, totalled about 75 seconds out of 1107. The O(n²) loop specifically was 2.3
+seconds. The lesson is the standard one, learned concretely: optimise what you measured,
+not what looks expensive.
+
+| Stage | Calls | LLM seconds |
+|---|---:|---:|
+| Extraction | 51 | 1225 (69%) |
+| Core profile refresh | 11 | 400 (23%) |
+| Reconcile | 11 | 118 |
+| Reflect / evolve / dedup | 33 | 112 |
+
+Two pure-scheduling changes cut per-question time from 18.4 minutes to 9.4 (a 49%
+reduction): the core profile is refreshed **once** at the end rather than after every
+batch (it was rebuilding an 80-word profile eleven times and discarding ten), and the
+independent sleep-pass stages now run concurrently. Separately, deduplication clustering
+was vectorised into a single matrix multiplication (roughly 490 times faster on that
+stage), the write path was batched into one embedding call and one upsert instead of one
+round trip per fact, and the three consolidation stages that never used embeddings
+stopped fetching them.
+
+**A caveat on all timing claims here.** A full run was launched and abandoned at 4 of 30
+questions when elapsed time implied about 34 minutes per question, against 9.4 measured
+hours earlier on identically-sized questions. A single extraction call re-timed at 38.3
+seconds against an 18.2-second baseline — same code, same input, roughly twice as slow
+upstream. The shared provider pool degrades under sustained load, and it returned a rate
+limit notice earlier the same day. **Any timing number in this report is only valid
+against a baseline measured in the same session.**
 
 ---
 
-*Dataset: `longmemeval_oracle.json` (500 questions; stratified first-5 per type by question id, deterministic). Judge: same model as the system under test; abstention-aware rubric. All memory writes ran against a throwaway database in a temp directory — no production memories were touched.*
+## 6. What the measurements can and cannot tell us
+
+Being straight about the instrument matters more than the headline score.
+
+### 6.1 The store audit is unreliable at haystack scale, and we can prove it
+
+The store audit works by dumping everything the write path stored into one LLM call and
+asking whether the gold answer is derivable. At oracle scale that is a manageable
+context. At haystack scale it is hundreds of records, and the audit starts missing
+things that are there.
+
+The proof is internal to the data. Retrieval surfaces a strict subset of what the store
+holds, so it is logically impossible for the retrieval audit to find an answer the store
+audit could not. In the final haystack run that happened on **6 of 28 questions**. In the
+oracle run it happened once.
+
+The consequence is concrete: the store coverage figures below understate the haystack
+write path, and haystack failures labelled "write-path loss" are partly mislabelled
+retrieval or judgment calls. We report the numbers with the caveat attached rather than
+quietly dropping them.
+
+| Run | Answer present in store | Survived retrieval |
+|---|---|---|
+| Oracle 30 | 22/28 | 20/28 |
+| Haystack 30 | 15/28 *(understated — see above)* | 20/28 |
+
+### 6.2 Run-to-run variance is real and was once 40% of our failure rate
+
+Early in the project all LLM calls ran at temperature 0.7. A re-run of the 10 failures
+from the baseline showed **4 of them passed on the second attempt** with no code change.
+Forty percent of what looked like systematic error was noise. Everything now runs at
+temperature 0.0 (`memory/llm.py:15`).
+
+That removed the variance we could remove. What remains, documented in §5.1, is that
+extraction still produces different fact subsets run to run at temperature 0. Any
+single-run comparison of two configurations on 30 questions carries an error bar of at
+least a couple of questions, and we treat differences of one or two as noise.
+
+### 6.3 These scores are not comparable to published leaderboard numbers
+
+Published LongMemEval results in the 80 to 95% range — full-context GPT-4o around 60%,
+Zep with GPT-4o around 71%, Emergence around 86% — differ from ours in ways that all cut
+the same direction:
+
+- They run all 500 questions; we run a stratified 30. Our error bar is large.
+- They use frontier models, often with cross-encoder rerankers; we use a 30B open-weights
+  model for memory work.
+- Some vendor-reported figures use their own harness and judge.
+
+The honest reading of our 87% is *not* "better than Zep". It is that the per-category
+shape is sensible, the failure modes are diagnosed rather than mysterious, and the score
+moved for reasons we can point at.
+
+### 6.4 The judge shares a model family with the answerer
+
+DeepSeek writes the answers and also judges them, and it runs the derivability audits.
+This is a known weakness in the setup. We saw it bite in one specific way: the audit
+judge labels derived-number questions "not in store" more strictly than the previous
+judge did, so part of the write-path column moving is a *measurement* change rather than
+a system change. An independent judge model is the obvious next improvement to the
+harness.
+
+---
+
+## 7. What is still open
+
+Ranked by how much they would move the result.
+
+1. **Extraction completeness is now the system's ceiling.** With reasoning moved into
+   code and retrieval performing well, the probability that every needed fact survives
+   extraction is what limits the score. The completeness pass narrows this but does not
+   close it — the doctor and battery questions still fail in both settings. The designed
+   next lever is re-extraction from the archived raw transcripts in the experience bank,
+   targeted at questions the system could not answer.
+2. **Guarded recall taxes derivational questions.** The rule that fixed the hallucination
+   failures — quote an exact source or decline — makes aggregation questions harder,
+   because no memory literally *states* a count. We watched the doctor question fail
+   three different ways across three runs (over-counting, then miscounting because of a
+   false `[OLD]` tag, then over-abstaining) with the memory layer's contribution
+   shrinking each time. Loosening quote-or-decline for derived questions without
+   reopening the abstention hole is a deliberate, separately-tested change.
+3. **Amount arithmetic** (the coffee-mug case) is the one aggregation family deliberately
+   left unbuilt. It needs the selection call to label roles — which number is the total,
+   which is the divisor — rather than just membership.
+4. **An independent judge model**, per §6.4.
+5. **Code-enforced abstention** stays designed and shelved. It should only be revived if
+   the model swap's gains regress, and it needs false-positive calibration on
+   non-abstention questions first.
+
+Explicitly **not** worth chasing: more retrieval tuning (it is not the failing stage);
+prompt-level abstention fixes (seven runs of evidence say no); and the benchmark headline
+itself, since the remaining gap is concentrated in extraction variance and model
+judgment, neither of which responds to polish.
+
+---
+
+## 8. Reproducing this
+
+```bash
+# LongMemEval, oracle setting, 30 questions (5 per type)
+python eval/run_longmemeval.py --per-type 5 --out my-run.json
+
+# A single category, or specific question ids
+python eval/run_longmemeval.py --types temporal-reasoning,knowledge-update
+python eval/run_longmemeval.py --ids 00ca467f,09d032c9
+
+# Haystack setting (~45 sessions/question); --sleep-every batches consolidation
+python eval/run_longmemeval.py --haystack --per-type 5 --sleep-every 5
+
+# The internal 14-scenario suite — pennies, minutes, catches regressions
+python eval/run_eval.py
+```
+
+Results are written to `eval/results/` after every question, so an interrupted run keeps
+what it finished. The run-by-run index with pipeline state and scores is
+`eval/results/README.md`.
+
+Datasets live in `eval/data/` and are gitignored — download `longmemeval_oracle.json`
+and `longmemeval_s_cleaned.json` from the `xiaowu0162/longmemeval-cleaned` repository on
+HuggingFace.
+
+Models are set in `.env`: `MEMORY_MODEL` for memory operations and `MEMORY_CHAT_MODEL`
+for the answer path. Both currently point at OpenRouter.
+
+**Cost.** The two final 30-question runs together cost approximately $2.00. The internal
+suite is a few cents. The working rule that emerged: verify offline against archived
+stores first, then run the internal suite, and spend on a haystack run only to confirm a
+specific failure mode is fixed.
+
+---
+
+*All memory writes during evaluation run against a throwaway database in a temporary
+directory, under a per-question user id. No production or personal memories are touched
+by any run in this report.*
