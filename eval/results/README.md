@@ -46,13 +46,16 @@ are not comparable to the 30-question runs; read them per question.
 | `longmemeval-07-smoke-after-fixes.json` | Oracle smoke of the 7 targeted questions after fixes | see file |
 | `longmemeval-08-haystack-pilot.json` | First haystack pilot, 1 per type | 5/6 (83%) |
 | `longmemeval-09-status-fix.json` | Status field added; targeted re-run | see file |
-| `longmemeval-10-batch1-SUPERSEDED-telemetry-race.json` | Batch 1 partial (5/10 scored) — killed after a sleep pass failed on the ChromaDB telemetry race; kept for its diagnostics | 3/5, invalid |
 | `longmemeval-11-batch1-all-fixes.json` | Batch 1 full, every fix active (ranking, floor, ordering, event guard, truncation, telemetry) | 5/10 (50%); store 9/9, retrieval 9/9, all failures reasoning loss |
 
 Batch 1 is the two hardest categories (knowledge-update + multi-session) — its
 totals are not comparable to per-type-sampled runs. The 50% run's loss
 attribution is the meaningful number: no write-path or retrieval losses remain.
-Analysis and roadmap: `blackboard.md` at the repo root.
+Analysis and roadmap: `report.md` at the repo root.
+
+An earlier batch-1 attempt (`longmemeval-10`) was deleted: it was killed
+mid-run by the ChromaDB telemetry race, so its scores were never valid. The bug
+and its real fix are written up in `report.md` §5.1.
 
 ## Split-model runs (Qwen3-30B memory + DeepSeek-3.2 answers)
 
@@ -62,11 +65,13 @@ Analysis and roadmap: `blackboard.md` at the repo root.
 | `internal-11-chat-deepseek.json` | Internal, DeepSeek answer path, first gate | 12/13 — exposed the gate wording dropping friend-facts |
 | `internal-12-chat-deepseek-gate2.json` | Internal, after gate-wording fix | 13/13 |
 | `longmemeval-12-oracle60-deepseek-chat.json` | Oracle, 10/type | 44/60 (73%); temporal 40% is date-arithmetic declines |
-| `longmemeval-13-haystack30-deepseek-chat.json` + `-13b-...-remainder.json` (merged: `-MERGED.json`) | Haystack, 5/type (run split by an external stop) | **23/30 (77%)**; abstention 2/2 |
+| `longmemeval-13-haystack30-deepseek-chat-MERGED.json` | Haystack, 5/type (run split by an external stop, halves merged) | **23/30 (77%)**; abstention 2/2 |
 | `internal-13-aggregation.json` | Internal (now 14 questions), aggregation path live | 14/14 |
 | `longmemeval-14-oracle-agg-retest.json` | Oracle, the 8 count/date failures re-run with aggregation | 3/8 flipped; all passes used the computed aggregate; remaining fails are per-run extraction misses |
 | `longmemeval-15-haystack-agg-retest.json` | Haystack, doctor + museum re-run | 0/2 — both blocked by extraction variance (opposite facts missing vs the oracle run) |
 | `internal-14-gap-check.json` | Internal, extraction gap check live (second "what did I miss?" pass per session) | 14/14, twice in a row (first run wasn't saved) — offline replay of the doctor question separately verified the pass recovers the missing appointment |
+| `longmemeval-16-oracle30-gap-check.json` | Oracle, 5/type, everything active (aggregation + gap check) | **26/30 (87%)** — temporal 5/5 (was 40%), knowledge-update 5/5, abstention 2/2; fails: doctor + battery (write-path), leadership % (retrieval), chess (reasoning) |
+| `longmemeval-17-haystack30-gap-check-MERGED.json` | Haystack, 5/type, everything active (run split by an external stop at 12/30, halves merged) | **26/30 (87%)** — temporal 5/5, knowledge-update 5/5, assistant 5/5, abstention 2/2; fails: doctor + coffee-mug + battery (write-path), vintage-cameras (reasoning). Two transient OpenRouter outages dropped 6 sessions across 2 questions; both questions passed anyway |
 
 ## Fields
 
