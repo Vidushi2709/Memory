@@ -41,7 +41,6 @@ async def _store_all(user_id: int, facts: list[Memory], dates: list[str], sessio
     return await add_memory(
         embedded_memories=[
             EmbeddedMemory(
-                id="",
                 user_id=user_id,
                 memory_text=fact.information,
                 categories=fact.predicted_category,
@@ -114,7 +113,6 @@ async def _completeness_pass(
 
         await add_memory([
             EmbeddedMemory(
-                id="",
                 user_id=user_id,
                 memory_text=fact.information,
                 categories=fact.predicted_category,

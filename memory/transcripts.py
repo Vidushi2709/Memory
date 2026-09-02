@@ -5,8 +5,16 @@ from datetime import datetime
 
 from rank_bm25 import BM25Okapi
 
-TRANSCRIPT_DIR = "./transcripts"
+from memory import MEMORY_DIR
+
+TRANSCRIPT_DIR = os.path.join(MEMORY_DIR, "transcripts")
 TURN_SEARCH_TOP_K = 5
+
+
+def delete_transcripts(user_id: int):
+    path = os.path.join(TRANSCRIPT_DIR, f"user_{user_id}.jsonl")
+    if os.path.exists(path):
+        os.remove(path)
 
 
 def archive_exchange(user_id: int, session_id: str, user_msg: str, assistant_msg: str, ts: str = ""):
