@@ -1,6 +1,5 @@
-chromadb==1.1.1
 dspy==3.1.3
-sentence-transformers==5.2.0
+fastembed==0.8.0          # ONNX embeddings; replaced sentence-transformers+torch
 rank-bm25==0.2.2
 networkx==3.6.1
 pydantic==2.11.10
@@ -8,3 +7,6 @@ numpy==2.3.5
 python-dotenv==1.2.2
 rich==14.2.0
 pytest==9.0.2
+
+# Only needed to run migrate_chroma_to_sqlite.py once. Uninstall after.
+chromadb==1.1.1

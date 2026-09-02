@@ -1,0 +1,10 @@
+[
+  {
+    "scenario": "counting_events",
+    "category": "aggregation",
+    "question": "How many concerts have I been to?",
+    "expected": "2",
+    "answer": "You've been to 2 concerts recently: one by Prateek Kuhad and another by a small indie band. You also have tickets for Coldplay!",
+    "correct": true
+  }
+]

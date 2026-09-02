@@ -101,6 +101,17 @@ class ReconcilePlanSignature(dspy.Signature):
       topic, person, or activity). Prefer linking over superseding when the new
       memory adds detail rather than replacing the fact.
 
+    A completed occurrence NEVER supersedes another completed occurrence.
+    Attending a concert, seeing a doctor, taking a trip, finishing a project:
+    each one is its own event, and events accumulate rather than replace each
+    other. Two concerts on different dates are two concerts — link them, never
+    supersede. Superseding is only for a mutually exclusive STATE, where the
+    new fact makes the old one false: where the user lives, who they work for,
+    what they own, anything that can hold only one value at a time.
+
+    The test to apply to every candidate pair: could both still be true of the
+    user's life? If yes, it is a link, not a supersede.
+
     Only include pairs you are confident about. Output empty strings if none.
     """
 

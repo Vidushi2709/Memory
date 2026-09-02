@@ -42,9 +42,9 @@ from dotenv import dotenv_values
 
 os.environ.setdefault("OPEN_ROUTER_KEY", dotenv_values(os.path.join(REPO, ".env")).get("OPEN_ROUTER_KEY") or "")
 
-# Isolate ./chroma_db and ./transcripts before the memory modules import
+# Isolate chroma_db/ and transcripts/ before the memory modules import
 _workdir = tempfile.mkdtemp(prefix="lme_eval_")
-os.chdir(_workdir)
+os.environ["MEMORY_DIR"] = _workdir
 sys.path.insert(0, REPO)
 
 import dspy

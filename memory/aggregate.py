@@ -57,6 +57,14 @@ class SelectMembers(dspy.Signature):
     visit where a doctor examined the user IS a doctor's appointment. Do not
     select general observations, habits, or summaries — only concrete
     instances. If two memories describe the same instance, select only one.
+
+    Memories sharing a date are the prime suspects for this. Extraction often
+    writes the same event twice, once generically and once with the detail
+    ("attended a concert yesterday" alongside "attended the indie band's show
+    at Fandom yesterday"). Same date, same kind of event, and the generic one
+    adds no instance the specific one does not already cover: that is ONE
+    instance. Keep the specific memory and drop the generic one.
+
     Output the 0-based indices, comma-separated; empty if none.
     """
 
@@ -204,6 +212,13 @@ async def _aggregate_count(question: str, current, today) -> str:
         "an actual event or thing that happened or exists (a plan or intention is NOT one)"
     )
     candidates = [r for r in current if r.status in statuses]
+    if not pending:
+        # You cannot already have attended a concert that happens next January.
+        # Extraction labels "booked tickets for the January show" as happened —
+        # the booking did happen — while correctly dating the event in the
+        # future, so status alone does not keep it out of a past-tense count.
+        candidates = [r for r in candidates
+                      if not ((d := _parse_date(r.date)) and d.date() > today.date())]
 
     window = _month_window(question, [r.date for r in candidates], today)
     if window:
