@@ -84,7 +84,14 @@ _members = dspy.Predict(SelectMembers)
 _anchors = dspy.Predict(SelectAnchors)
 
 
+_FIRST_PERSON_RE = re.compile(r"\b(?:i|i'?ve|i'?m|me|my|we|our)\b", re.I)
+
+
 def _detect(question: str):
+    # "how many calories in an egg" is general knowledge: only a question about
+    # the user's own record earns a full store scan plus an LLM selection call
+    if not _FIRST_PERSON_RE.search(question):
+        return None
     if _DIFF_RE.search(question):
         return "diff"
     if _COUNT_RE.search(question):

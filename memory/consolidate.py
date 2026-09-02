@@ -13,6 +13,7 @@ from memory.memory_store import (
     get_core_memory,
     kind_of,
     mark_memory_old,
+    mark_reconciled,
     set_context,
     set_core_memory,
 )
@@ -59,14 +60,17 @@ class MergeMemoriesSignature(dspy.Signature):
 
 class ReflectionSignature(dspy.Signature):
     """
-    You are given recent memories about a user. State 2-3 higher-level insights
-    that emerge from combining them (patterns, goals, traits). Only state
-    insights strongly supported by the memories — never guess or invent.
-    Return an empty list if nothing meaningful emerges.
+    You are given recent memories about a user and the insights previously
+    drawn about them. Output the COMPLETE updated set of 2-3 higher-level
+    insights (patterns, goals, traits): keep previous insights that still
+    hold, revise ones the recent memories change, drop ones they contradict.
+    Only state insights strongly supported by the memories — never guess or
+    invent. Return an empty list if nothing meaningful emerges.
     """
 
     recent_memories: list[str] = dspy.InputField()
-    insights: list[str] = dspy.OutputField()
+    previous_insights: list[str] = dspy.InputField()
+    insights: list[str] = dspy.OutputField(desc="The full current set; replaces previous_insights.")
 
 
 class EvolveContextSignature(dspy.Signature):
@@ -108,22 +112,19 @@ class ReconcilePlanSignature(dspy.Signature):
 
 class CoreMemorySignature(dspy.Signature):
     """
-    Maintain a short always-visible profile of the user: name, location, work,
+    Write a short always-visible profile of the user: name, location, work,
     and their most important preferences. Plain sentences, under 80 words.
-    Use ONLY information present in current_core or new_facts — NEVER invent,
-    guess, or embellish details that were not stated.
+    Use ONLY information present in facts — NEVER invent, guess, or embellish
+    details that were not stated. The facts are the user's CURRENT state:
+    anything not in them is not in the profile.
 
     Other people's names are not the user's attributes. If a fact mentions
     "Dr. Thompson" or "my friend Zubin", those names belong to them, not to the
     user — never turn one into the user's own name, job, or trait. State the
     user's name only if a fact says explicitly that it is theirs.
-
-    Fold the new facts into current_core, dropping nothing that is still true.
-    If the new facts change nothing, return current_core unchanged.
     """
 
-    current_core: str = dspy.InputField()
-    new_facts: list[str] = dspy.InputField()
+    facts: list[str] = dspy.InputField(desc="The user's current facts, most important first.")
     updated_core: str = dspy.OutputField()
 
 
@@ -243,7 +244,11 @@ CORE_FACT_CAP = 30  # most important facts the profile is rebuilt from
 
 async def refresh_core_memory(user_id: int):
     """Rebuild the always-in-prompt profile from the user's most important
-    current facts — the profile describes the whole person, not one session."""
+    current facts — the profile describes the whole person, not one session.
+
+    Rebuilt from scratch, not edited: feeding the old profile back in meant a
+    superseded fact ("lives in Delhi") survived every rewrite, because nothing
+    told the model which sentence had become false."""
     recs = await fetch_user_records_raw(user_id, include_embeddings=False)
     current = [
         meta for meta in recs["metadatas"]
@@ -256,7 +261,7 @@ async def refresh_core_memory(user_id: int):
         return
     current_core = await get_core_memory(user_id)
     try:
-        out = await _call(_core_updater, current_core=current_core, new_facts=facts)
+        out = await _call(_core_updater, facts=facts)
         new_core = out.updated_core.strip()
     except Exception:
         return
@@ -302,7 +307,27 @@ async def sleep_pass(user_id: int, session_ids, refresh_core: bool = True) -> st
 
     if refresh_core:
         await refresh_core_memory(user_id)
+
+    # stamp the sessions this pass covered, so a pass that never ran (process
+    # killed mid-session) is visible to unreconciled_sessions and repaired later
+    recs = await fetch_user_records_raw(user_id, include_embeddings=False)
+    await mark_reconciled([
+        id_ for id_, meta in zip(recs["ids"], recs["metadatas"])
+        if meta.get("session_id") in sids and kind_of(meta) == "fact"
+    ])
     return ", ".join(p for p in parts if p)
+
+
+async def unreconciled_sessions(user_id: int) -> list[str]:
+    """Session ids with current facts no sleep pass has reconciled. Callers run
+    `sleep_pass(user_id, unreconciled_sessions(user_id))` at startup."""
+    recs = await fetch_user_records_raw(user_id, include_embeddings=False)
+    pending = {
+        meta["session_id"] for meta in recs["metadatas"]
+        if meta.get("session_id") and kind_of(meta) == "fact"
+        and int(meta.get("is_current", 1)) == 1 and not meta.get("reconciled")
+    }
+    return sorted(pending, key=_natural_key)
 
 
 def _clusters(items) -> list[list[int]]:
@@ -357,18 +382,16 @@ async def dedup_memories(user_id: int, session_id: str = "") -> str:
         for group in _clusters(items):
             members = [items[i] for i in group]
 
-            # Members that disagree on a number are a progression, not
-            # duplication ("completed 4 projects" then "completed 5"): merging
-            # bakes the conflict into one memory ("4 to 5 projects"). The
-            # newest statement wins; older ones become history. No LLM needed.
+            # Members that disagree on a number are not duplicates: either a
+            # progression ("completed 4 projects" then "5") or distinct events
+            # ("ran 5 km on the 3rd", "ran 8 km on the 10th"). Merging bakes the
+            # conflict into one memory; hiding the older one erased real events.
+            # Keep all current and linked — retrieval shows both with dates, and
+            # the reconcile call (which sees dates) is the one allowed to supersede.
             nums = [_numbers(m[2]) for m in members]
             if any(n != nums[0] for n in nums):
                 members.sort(key=lambda m: m[1].get("saved_at", ""))
-                newest = members[-1]
-                older_ids = [m[0] for m in members[:-1]]
-                for oid in older_ids:
-                    await mark_memory_old(oid)
-                await add_links(newest[0], older_ids)  # keep the history reachable
+                await add_links(members[-1][0], [m[0] for m in members[:-1]])
                 resolved_count += 1
                 continue
 
@@ -387,7 +410,6 @@ async def dedup_memories(user_id: int, session_id: str = "") -> str:
             embedding = (await generate_embeddings([text]))[0]
             new_ids = await add_memory([
                 EmbeddedMemory(
-                    id="",
                     user_id=user_id,
                     memory_text=text,
                     categories=categories,
@@ -419,7 +441,7 @@ async def dedup_memories(user_id: int, session_id: str = "") -> str:
     if merged_count:
         parts.append(f"merged {merged_count} duplicate group(s)")
     if resolved_count:
-        parts.append(f"resolved {resolved_count} progression(s)")
+        parts.append(f"linked {resolved_count} numeric-variant group(s)")
     return ", ".join(parts) if parts else "no duplicates found"
 
 
@@ -468,13 +490,15 @@ async def maybe_reflect(user_id: int, session_id: str = "") -> list[str]:
     recs = await fetch_user_records_raw(user_id, include_embeddings=False)
 
     last_reflection = ""
-    facts = []
-    for meta in recs["metadatas"]:
+    facts, previous = [], []
+    for id_, meta in zip(recs["ids"], recs["metadatas"]):
         if meta.get("type") == "core":
             continue
         kind = kind_of(meta)
         if kind == "insight":
             last_reflection = max(last_reflection, meta.get("saved_at", ""))
+            if int(meta.get("is_current", 1)) == 1:
+                previous.append((id_, meta["memory_text"]))
         elif kind == "fact" and int(meta.get("is_current", 1)) == 1:
             facts.append(meta)
 
@@ -485,24 +509,29 @@ async def maybe_reflect(user_id: int, session_id: str = "") -> list[str]:
     fresh.sort(key=lambda m: m.get("saved_at", ""))
     try:
         out = await _call(_reflector,
-                          recent_memories=[m["memory_text"] for m in fresh[-30:]])
+                          recent_memories=[m["memory_text"] for m in fresh[-30:]],
+                          previous_insights=[t for _, t in previous])
         insights = [s.strip() for s in out.insights if s.strip()][:3]
     except Exception:
         return []
 
+    # the new set replaces the old: insights are re-derived, not accumulated,
+    # so a generalisation the facts no longer support does not live forever
     for text in insights:
         embedding = (await generate_embeddings([text]))[0]
         await add_memory([
             EmbeddedMemory(
-                id="",
                 user_id=user_id,
                 memory_text=text,
                 categories=["insight"],
                 embedding=embedding,
                 date=datetime.now().isoformat(),
-                importance=7,
+                # default importance: a derived generalisation must not outrank
+                # the specific facts it was derived from
                 session_id=session_id,
                 kind="insight",
             )
         ])
+    for pid, _ in previous:
+        await mark_memory_old(pid)
     return insights

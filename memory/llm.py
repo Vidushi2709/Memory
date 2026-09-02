@@ -5,10 +5,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = os.getenv("MEMORY_MODEL", "openrouter/mistralai/mistral-small-3.2-24b-instruct")
+# Defaults are the pair the report's numbers were measured with (report.md §5.6),
+# so a fresh clone runs the system that was evaluated.
+MODEL = os.getenv("MEMORY_MODEL", "openrouter/qwen/qwen3-30b-a3b-instruct-2507")
 # The answer path is one call per question while ingestion is hundreds, so a
-# stronger (pricier) model here costs almost nothing extra. Defaults to MODEL.
-CHAT_MODEL = os.getenv("MEMORY_CHAT_MODEL", MODEL)
+# stronger (pricier) model here costs almost nothing extra.
+CHAT_MODEL = os.getenv("MEMORY_CHAT_MODEL", "openrouter/deepseek/deepseek-v3.2")
 API_KEY_ENV = os.getenv("MEMORY_API_KEY_ENV", "OPEN_ROUTER_KEY")
 
 # memory work is judgment, not creativity — variance was 40% of eval failures

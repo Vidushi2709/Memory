@@ -1,4 +1,6 @@
+import logging
 import math
+import os
 import re
 import threading
 from datetime import datetime
@@ -10,6 +12,10 @@ import chromadb
 from chromadb.config import Settings
 import networkx as nx
 import asyncio
+from memory import MEMORY_DIR
+from memory.transcripts import delete_transcripts
+
+log = logging.getLogger(__name__)
 
 COLLECTION_NAME = "memories_bring_back_memories"
 EMBEDDING_DIM = 384  # all-MiniLM-L6-v2
@@ -43,7 +49,7 @@ except Exception:  # library layout changed — the setting below still applies
     pass
 
 _chroma = chromadb.PersistentClient(
-    path="./chroma_db",  # persists to disk across sessions
+    path=os.path.join(MEMORY_DIR, "chroma_db"),  # persists to disk across sessions
     settings=Settings(anonymized_telemetry=False),
 )
 _write_lock = threading.Lock()  # writes run in worker threads and can overlap
@@ -57,7 +63,6 @@ def _get_collection():
 
 
 class EmbeddedMemory(BaseModel):
-    id: str
     user_id: int
     memory_text: str
     categories: List[str]
@@ -138,17 +143,38 @@ async def add_memory(embedded_memories: List[EmbeddedMemory]) -> List[str]:
 
 
 async def delete_user_records(user_id: int):
+    """Forget a user completely: memories, core profile AND raw transcripts —
+    the transcripts are searched on every query, so leaving them is not forgetting."""
     def _delete():
-        col = _get_collection()
-        col.delete(where={"user_id": {"$eq": user_id}})
+        with _write_lock:
+            _get_collection().delete(where={"user_id": {"$eq": user_id}})
+        delete_transcripts(user_id)
     await asyncio.to_thread(_delete)
 
 
 async def delete_records(point_ids: List[str]):
     def _delete():
-        col = _get_collection()
-        col.delete(ids=point_ids)
+        with _write_lock:
+            _get_collection().delete(ids=point_ids)
     await asyncio.to_thread(_delete)
+
+
+async def mark_reconciled(point_ids: List[str]):
+    """Stamp facts the sleep pass has reconciled. Sessions whose facts lack the
+    stamp (process killed before the pass ran) are found by
+    consolidate.unreconciled_sessions and repaired on the next pass."""
+    def _mark():
+        if not point_ids:
+            return
+        col = _get_collection()
+        with _write_lock:
+            hit = col.get(ids=point_ids, include=["metadatas", "embeddings", "documents"])
+            for meta in hit["metadatas"]:
+                meta["reconciled"] = 1
+            if hit["ids"]:
+                col.upsert(ids=hit["ids"], embeddings=hit["embeddings"],
+                           metadatas=hit["metadatas"], documents=hit["documents"])
+    await asyncio.to_thread(_mark)
 
 
 def _update_meta_locked(point_id: str, updates: dict):
@@ -261,6 +287,7 @@ async def search_memories(
     categories: Optional[List[str]] = None,
     top_k: int = 5,
     include_old: bool = False,
+    touch: bool = True,
 ) -> List[RetrievedMemory]:
     """
     Hybrid search over a user's memories.
@@ -285,6 +312,9 @@ async def search_memories(
     Args:
         query_text: Raw query text for the BM25 ranking. If None, vector-only.
         include_old: If True, also search superseded (old) memories.
+        touch: If True (default), hits are "rehearsed" — last_accessed resets
+            and strength grows, which changes future rankings. Pass False for
+            read-only lookups (browsing, evals, diagnostics).
 
     NOTE: ChromaDB 1.4.x metadata filters only support
     $eq / $ne / $gt / $gte / $lt / $lte / $in / $nin.
@@ -335,8 +365,8 @@ async def search_memories(
                 # 0.5 and let everything through the floor.
                 if id_ in eligible and 1.0 - dist >= RELEVANCE_FLOOR:
                     vec_rank.append(id_)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("vector search failed, falling back to keyword ranking: %s", e)
 
         # BM25 keyword ranking over enriched note text (content + keywords + context)
         bm25_rank = []
@@ -372,8 +402,8 @@ async def search_memories(
                     cutoff = max(pr.values()) * PPR_MIN_SHARE
                     ppr_rank = [n for n, s in sorted(pr.items(), key=lambda x: x[1], reverse=True)
                                 if s >= cutoff][:fetch_k]
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("pagerank failed, ranking without it: %s", e)
 
         # Reciprocal rank fusion across the three rankings
         rrf: dict = {}
@@ -405,7 +435,7 @@ async def search_memories(
         top = scored[:top_k]
 
         # Touch winners: recency resets and strength grows (Ebbinghaus rehearsal)
-        if top:
+        if top and touch:
             with _write_lock:
                 hit = col.get(ids=[id_ for _, id_, _ in top],
                               include=["metadatas", "embeddings", "documents"])
