@@ -30,6 +30,7 @@ os.environ.setdefault("OPEN_ROUTER_KEY", dotenv_values(os.path.join(REPO, ".env"
 # Isolate chroma_db/ and transcripts/ before the memory modules import
 _workdir = tempfile.mkdtemp(prefix="memory_eval_")
 os.environ["MEMORY_DIR"] = _workdir
+os.environ["MEMORY_PERSONAL_MODE"] = "0"   # benchmark behaviour: grounding guard on, reflection at 40
 sys.path.insert(0, REPO)
 sys.path.insert(0, SCRIPT_DIR)
 

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from datetime import datetime
 import numpy as np
@@ -17,6 +18,7 @@ from memory.memory_store import (
     set_context,
     set_core_memory,
 )
+from memory import PERSONAL_MODE
 from memory.llm import get_lm, was_truncated
 
 DEDUP_SIMILARITY = 0.9     # cosine similarity above which memories count as duplicates
@@ -25,7 +27,13 @@ _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 def _numbers(text: str) -> set:
     return set(_NUM_RE.findall(text))
-REFLECTION_THRESHOLD = 40  # summed importance of fresh facts that triggers reflection
+# Summed importance of fresh facts that triggers reflection. Reflection writes
+# "insight" memories — LLM generalisations over recent facts — and on a real
+# personal store the early ones were vague ("has a diverse range of interests")
+# while competing for the same retrieval slots as the facts they came from. So
+# personal mode sets the bar much higher; 0 disables reflection entirely.
+REFLECTION_THRESHOLD = int(os.getenv("MEMORY_REFLECTION_THRESHOLD",
+                                     "150" if PERSONAL_MODE else "40"))
 EVOLVE_NEW_CAP = 3         # newest session memories considered for evolution
 EVOLVE_LINK_CAP = 2        # linked neighbors re-examined per new memory
 
@@ -123,8 +131,17 @@ class ReconcilePlanSignature(dspy.Signature):
 
 class CoreMemorySignature(dspy.Signature):
     """
-    Write a short always-visible profile of the user: name, location, work,
-    and their most important preferences. Plain sentences, under 80 words.
+    Write a short always-visible profile of the USER — the person, not their
+    latest task. Cover who they are, the projects they work on (name several,
+    briefly), the tools, models and hardware they use, and the standing
+    preferences they have stated about how they want work done. Plain
+    sentences, under 120 words.
+
+    Never let one project or one conclusion take over the profile. If the facts
+    are dominated by a single piece of research or a single component, mention
+    it in one clause and spend the rest on the breadth of what they do. A
+    reader should come away knowing this person, not a project abstract.
+
     Use ONLY information present in facts — NEVER invent, guess, or embellish
     details that were not stated. The facts are the user's CURRENT state:
     anything not in them is not in the profile.
@@ -250,7 +267,7 @@ async def reconcile_session(user_id: int, session_ids) -> str:
                       if refused else "")
 
 
-CORE_FACT_CAP = 30  # most important facts the profile is rebuilt from
+CORE_FACT_CAP = 40  # facts the profile is rebuilt from, spread across categories
 
 
 async def refresh_core_memory(user_id: int):
@@ -267,7 +284,20 @@ async def refresh_core_memory(user_id: int):
         and int(meta.get("is_current", 1)) == 1
     ]
     current.sort(key=lambda m: (int(m.get("importance", 5)), m.get("saved_at", "")), reverse=True)
-    facts = [m["memory_text"] for m in current[:CORE_FACT_CAP]]
+
+    # Round-robin across categories rather than taking the globally most
+    # important facts. On a real store the top of that ranking was entirely one
+    # project's research notes, and the profile came out reading like a paper
+    # abstract instead of a description of the person.
+    buckets: dict = {}
+    for m in current:
+        cat = (m.get("categories", "").split(",") or [""])[0].strip() or "other"
+        buckets.setdefault(cat, []).append(m["memory_text"])
+    facts, order = [], list(buckets)
+    while len(facts) < CORE_FACT_CAP and any(buckets[c] for c in order):
+        for cat in order:
+            if buckets[cat] and len(facts) < CORE_FACT_CAP:
+                facts.append(buckets[cat].pop(0))
     if not facts:
         return
     current_core = await get_core_memory(user_id)
@@ -498,6 +528,8 @@ async def maybe_reflect(user_id: int, session_id: str = "") -> list[str]:
     Generative Agents-style reflection: once enough important facts have
     accumulated since the last reflection, distill them into insight memories.
     """
+    if REFLECTION_THRESHOLD <= 0:
+        return []
     recs = await fetch_user_records_raw(user_id, include_embeddings=False)
 
     last_reflection = ""

@@ -7,6 +7,8 @@ faulty faculty is the comparison itself. So compare in code instead.
 """
 import re
 
+from memory import PERSONAL_MODE
+
 # capitalised words that carry no identity on their own
 _GENERIC = {
     "I", "I'm", "I've", "My", "Me", "We", "The", "A", "An", "Do", "Does", "Did",
@@ -50,6 +52,13 @@ def unverified_terms(question: str, sources: list[str]) -> list[str]:
     Only multi-word proper phrases are checked: they are specific enough that
     absence is meaningful, which keeps false positives low.
     """
+    # In personal mode this check is off. It exists to stop the model accepting
+    # a question's framing about a near-match role or person, which is a
+    # benchmark failure mode. In real use it fires on any capitalised phrase the
+    # store has not seen — "New York", "Taylor Swift", "Claude Code" — and turns
+    # an ordinary question into a denial that anything is known about it.
+    if PERSONAL_MODE:
+        return []
     phrases = question_phrases(question)
     if not phrases:
         return []
