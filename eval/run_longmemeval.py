@@ -20,6 +20,7 @@ Usage (from the repo root):
     python eval/run_longmemeval.py --ids 0862e8bf,118b2229
     python eval/run_longmemeval.py --haystack --per-type 1 --sleep-every 5
     python eval/run_longmemeval.py --out my-run.json     # → eval/results/my-run.json
+    python eval/run_longmemeval.py --min-importance 6    # admission control on
 """
 
 import argparse
@@ -42,9 +43,10 @@ from dotenv import dotenv_values
 
 os.environ.setdefault("OPEN_ROUTER_KEY", dotenv_values(os.path.join(REPO, ".env")).get("OPEN_ROUTER_KEY") or "")
 
-# Isolate ./chroma_db and ./transcripts before the memory modules import
+# Isolate chroma_db/ and transcripts/ before the memory modules import
 _workdir = tempfile.mkdtemp(prefix="lme_eval_")
-os.chdir(_workdir)
+os.environ["MEMORY_DIR"] = _workdir
+os.environ["MEMORY_PERSONAL_MODE"] = "0"   # benchmark behaviour: grounding guard on, reflection at 40
 sys.path.insert(0, REPO)
 
 import dspy
@@ -203,7 +205,7 @@ async def run_question(idx: int, item: dict) -> dict:
     core = await get_core_memory(user_id)
 
     # stage audits (skip for abstention questions — the gold answer is absence)
-    store_has, retrieval_has = None, None
+    store_has, retrieval_has, store_size = None, None, None
     if not is_abs:
         all_recs = await fetch_all_user_records(user_id)
         store_strings = ([f"CORE PROFILE: {core}"] if core else []) + [
@@ -213,6 +215,7 @@ async def run_question(idx: int, item: dict) -> dict:
             + f" [date: {r.date[:10]}]"
             for r in all_recs
         ] + [stringify_turn(l) for l in load_transcripts(user_id)]
+        store_size = len(all_recs)
         store_has = await audit_derivable(question, expected, store_strings)
         retrieval_has = await audit_derivable(
             question, expected,
@@ -267,6 +270,8 @@ async def run_question(idx: int, item: dict) -> dict:
         "store_has_answer": store_has,
         "retrieval_has_answer": retrieval_has,
         "loss_stage": stage,
+        "store_size": store_size,
+        "min_importance": int(os.getenv("MEMORY_MIN_IMPORTANCE", "0")),
         "aggregate_used": bool(aggregate),
     }
 
@@ -283,10 +288,16 @@ async def main():
     parser.add_argument("--data", default="")
     parser.add_argument("--out", default="longmemeval.json",
                         help="filename (written to eval/results/) or an absolute path")
+    parser.add_argument("--min-importance", type=int, default=0,
+                        help="admission control: refuse to store facts the extractor "
+                             "scored below this (0 = store everything, the default)")
     args = parser.parse_args()
 
     global SLEEP_EVERY
     SLEEP_EVERY = max(1, args.sleep_every)
+
+    # update_memories reads this on every call, so setting it here is in time
+    os.environ["MEMORY_MIN_IMPORTANCE"] = str(args.min_importance)
 
     data_path = args.data or (HAYSTACK_PATH if args.haystack else ORACLE_PATH)
     if not os.path.exists(data_path):
@@ -314,7 +325,8 @@ async def main():
 
     setting = "haystack (_s)" if args.haystack or "_s" in os.path.basename(data_path) else "oracle"
     console.print(f"[bold]LongMemEval {setting} — {len(sample)} questions[/bold] "
-                  f"(sleep pass every {SLEEP_EVERY} session(s), workdir: {_workdir})\n")
+                  f"(sleep pass every {SLEEP_EVERY} session(s), "
+                  f"min importance {args.min_importance}, workdir: {_workdir})\n")
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out_path = args.out if os.path.isabs(args.out) else os.path.join(RESULTS_DIR, args.out)
@@ -363,9 +375,11 @@ async def main():
     console.print(audit)
     in_store = [r["store_has_answer"] for r in non_abs]
     in_retr = [r["retrieval_has_answer"] for r in non_abs]
+    sizes = [r["store_size"] for r in non_abs if r["store_size"] is not None]
+    mean_size = f"  |  mean facts stored: {sum(sizes) / len(sizes):.1f}" if sizes else ""
     console.print(
         f"[dim]Answer present in store: {sum(in_store)}/{len(in_store)}  |  "
-        f"survived retrieval: {sum(in_retr)}/{len(in_retr)}[/dim]"
+        f"survived retrieval: {sum(in_retr)}/{len(in_retr)}{mean_size}[/dim]"
     )
 
     console.print(f"[dim]Raw results written to {out_path}[/dim]")

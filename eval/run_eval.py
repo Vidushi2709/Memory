@@ -13,6 +13,7 @@ Usage (from the repo root):
 """
 
 import argparse
+from datetime import date, timedelta
 import asyncio
 import json
 import os
@@ -26,9 +27,10 @@ from dotenv import dotenv_values
 
 os.environ.setdefault("OPEN_ROUTER_KEY", dotenv_values(os.path.join(REPO, ".env")).get("OPEN_ROUTER_KEY") or "")
 
-# Isolate ./chroma_db and ./transcripts before the memory modules import
+# Isolate chroma_db/ and transcripts/ before the memory modules import
 _workdir = tempfile.mkdtemp(prefix="memory_eval_")
-os.chdir(_workdir)
+os.environ["MEMORY_DIR"] = _workdir
+os.environ["MEMORY_PERSONAL_MODE"] = "0"   # benchmark behaviour: grounding guard on, reflection at 40
 sys.path.insert(0, REPO)
 sys.path.insert(0, SCRIPT_DIR)
 
@@ -95,9 +97,15 @@ async def ask(user_id: int, question: str) -> str:
 
 async def run_scenario(idx: int, scenario: dict) -> list[dict]:
     user_id = 1000 + idx
+    n = len(scenario["sessions"])
     for j, session in enumerate(scenario["sessions"]):
         session_id = f"eval-{idx}-{j}"
-        await update_memories(user_id, session, session_id=session_id)
+        # sessions happen on different days, like the LongMemEval runner feeds
+        # them: undated, "I moved last week" resolves to a date BEFORE the
+        # earlier session's "I live in Delhi", and the reconcile guard rightly
+        # refuses to let an older fact supersede a newer one
+        session_date = (date.today() - timedelta(days=30 * (n - 1 - j))).isoformat()
+        await update_memories(user_id, session, session_id=session_id, current_date=session_date)
         await sleep_pass(user_id, session_id)
 
     results = []

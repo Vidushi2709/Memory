@@ -1,15 +1,32 @@
+"""Memory store: one SQLite file, no server process.
+
+Replaced ChromaDB, which could not filter `is_current` or `categories`
+server-side and so fetched every record the user owned on every single query —
+310 ms at 10k memories, growing linearly. Here that filter is a WHERE clause.
+Backups are a file copy and the resident footprint is whatever SQLite caches.
+
+ponytail: vector search is a numpy brute-force dot product over the user's
+eligible rows. On this laptop that measured ~60x faster than sqlite-vec at 50k
+memories (13 ms vs 856 ms) and needs no loadable extension, at the cost of
+being O(n) per query. Past ~100k memories for one user, add sqlite-vec or an
+ANN index; the query path is the only thing that would change.
+
+ponytail: one connection guarded by one lock. Writes already run in worker
+threads, and at personal volume the lock is never contended. Per-connection
+pooling only matters if this ever serves several users at once.
+"""
 import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 from datetime import datetime
 from typing import Optional, List
 from uuid import uuid4
 from pydantic import BaseModel
 from rank_bm25 import BM25Okapi
-import chromadb
-from chromadb.config import Settings
+import numpy as np
 import networkx as nx
 import asyncio
 from memory import MEMORY_DIR
@@ -17,7 +34,7 @@ from memory.transcripts import delete_transcripts
 
 log = logging.getLogger(__name__)
 
-COLLECTION_NAME = "memories_bring_back_memories"
+DB_PATH = os.path.join(MEMORY_DIR, "memory.db")
 EMBEDDING_DIM = 384  # all-MiniLM-L6-v2
 
 STRENGTH_INIT = 5.0        # initial Ebbinghaus strength, in days of decay scale
@@ -35,31 +52,83 @@ IMPORTANCE_WEIGHT = 0.15   # importance and retention only break ties — releva
 RETENTION_WEIGHT = 0.10
 STALE_PENALTY = 0.30       # a superseded memory must lose to a current one of equal relevance
 
-# ChromaDB batches telemetry events in a plain dict with no lock, so two threads
-# can race to delete the same key and raise KeyError in the middle of a query —
-# which surfaces here as a whole sleep pass failing. anonymized_telemetry=False
-# only suppresses the network send; the unsafe batching still runs on every
-# get(). Neutralise the code path itself. Reproduced at ~1.3% of concurrent
-# reads before this, zero after.
-try:
-    from chromadb.telemetry.product.posthog import Posthog
+_lock = threading.RLock()
+_conn: Optional[sqlite3.Connection] = None
 
-    Posthog.capture = lambda self, event: None
-except Exception:  # library layout changed — the setting below still applies
-    pass
-
-_chroma = chromadb.PersistentClient(
-    path=os.path.join(MEMORY_DIR, "chroma_db"),  # persists to disk across sessions
-    settings=Settings(anonymized_telemetry=False),
-)
-_write_lock = threading.Lock()  # writes run in worker threads and can overlap
+# Search rebuilt the whole corpus on every query — fetching rows, building
+# dicts, normalising vectors, tokenising and indexing BM25. Profiled at 10k
+# memories that was ~370 ms of a ~700 ms query, and none of it changes between
+# writes. Cache it against a write counter instead.
+#
+# ponytail: single-process cache. If this ever runs as a multi-process server,
+# the counter has to live in the database rather than in this module.
+_write_version = 0
+_corpus_cache: dict = {}
+CORPUS_CACHE_SIZE = 4  # (user_id, include_old) pairs held at once
 
 
-def _get_collection():
-    return _chroma.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},  # cosine distance
-    )
+def _bump():
+    """Invalidate cached corpora. Callers hold _lock."""
+    global _write_version
+    _write_version += 1
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    id            TEXT    PRIMARY KEY,
+    user_id       INTEGER NOT NULL,
+    memory_text   TEXT    NOT NULL,
+    categories    TEXT    NOT NULL DEFAULT '',
+    date          TEXT    NOT NULL DEFAULT '',
+    timestamp     REAL    NOT NULL DEFAULT 0,
+    saved_at      TEXT    NOT NULL DEFAULT '',
+    is_current    INTEGER NOT NULL DEFAULT 1,
+    superseded_at TEXT    NOT NULL DEFAULT '',
+    importance    INTEGER NOT NULL DEFAULT 5,
+    last_accessed REAL    NOT NULL DEFAULT 0,
+    strength      REAL    NOT NULL DEFAULT 5.0,
+    session_id    TEXT    NOT NULL DEFAULT '',
+    kind          TEXT    NOT NULL DEFAULT 'fact',
+    keywords      TEXT    NOT NULL DEFAULT '',
+    context       TEXT    NOT NULL DEFAULT '',
+    status        TEXT    NOT NULL DEFAULT 'happened',
+    links         TEXT    NOT NULL DEFAULT '',
+    reconciled    INTEGER NOT NULL DEFAULT 0,
+    type          TEXT    NOT NULL DEFAULT '',
+    embedding     BLOB    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, is_current);
+"""
+
+# every column except the embedding blob — this is the "metadata" dict that
+# consolidation and retrieval read
+_META_COLS = [
+    "user_id", "memory_text", "categories", "date", "timestamp", "saved_at",
+    "is_current", "superseded_at", "importance", "last_accessed", "strength",
+    "session_id", "kind", "keywords", "context", "status", "links",
+    "reconciled", "type",
+]
+_META_SQL = ", ".join(_META_COLS)
+
+
+def _db() -> sqlite3.Connection:
+    global _conn
+    if _conn is None:
+        os.makedirs(MEMORY_DIR, exist_ok=True)
+        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")   # survives a crash mid-write
+        _conn.execute("PRAGMA synchronous=NORMAL")
+        _conn.executescript(SCHEMA)
+        _conn.commit()
+    return _conn
+
+
+def _to_blob(embedding) -> bytes:
+    return np.asarray(embedding, dtype=np.float32).tobytes()
+
+
+def _from_blob(blob) -> np.ndarray:
+    return np.frombuffer(blob, dtype=np.float32)
 
 
 class EmbeddedMemory(BaseModel):
@@ -96,48 +165,55 @@ class RetrievedMemory(BaseModel):
     linked: bool = False  # True if pulled in via link expansion, not ranked search
 
 
-# collection setup 
+# collection setup
 
 async def create_collection():
-    """Ensures the collection exists (ChromaDB creates it on first use)."""
-    await asyncio.to_thread(_get_collection)
-    print(f"Collection '{COLLECTION_NAME}' ready.")
+    """Ensure the database and schema exist."""
+    await asyncio.to_thread(_db)
+    print(f"Memory store ready at {DB_PATH}")
 
 
-# write operations 
+# write operations
 
 async def add_memory(embedded_memories: List[EmbeddedMemory]) -> List[str]:
     def _add():
         now = datetime.now()
         ids = [uuid4().hex for _ in embedded_memories]
-        metadatas = [
-            {
-                "user_id":     m.user_id,
-                "memory_text": m.memory_text,
-                "categories":  ",".join(m.categories),  # ChromaDB metadata values must be str/int/float
-                "date":        m.date,
-                "timestamp":   to_epoch(m.date),
-                "saved_at":    now.isoformat(),           # wall-clock time memory was written
-                "is_current":  m.is_current,             # 1=active, 0=superseded
-                "importance":  m.importance,
-                "last_accessed": now.timestamp(),        # epoch of last retrieval hit
-                "strength":    m.strength,
-                "session_id":  m.session_id,
-                "kind":        m.kind,
-                "keywords":    ",".join(m.keywords),
-                "context":     m.context,
-                "status":      m.status,                 # happened/planned/considered/ongoing
-                "links":       ",".join(m.links),        # comma-separated point ids
-            }
-            for m in embedded_memories
-        ]
-        with _write_lock:
-            _get_collection().upsert(
-                ids=ids,
-                embeddings=[m.embedding for m in embedded_memories],
-                metadatas=metadatas,
-                documents=[m.memory_text for m in embedded_memories],
+        rows = [
+            (
+                id_,
+                m.user_id,
+                m.memory_text,
+                ",".join(m.categories),
+                m.date,
+                to_epoch(m.date),
+                now.isoformat(),          # wall-clock time memory was written
+                m.is_current,             # 1=active, 0=superseded
+                "",                       # superseded_at
+                m.importance,
+                now.timestamp(),          # epoch of last retrieval hit
+                m.strength,
+                m.session_id,
+                m.kind,
+                ",".join(m.keywords),
+                m.context,
+                m.status,                 # happened/planned/considered/ongoing
+                ",".join(m.links),        # comma-separated point ids
+                0,                        # reconciled
+                "",                       # type ('core' marks the profile record)
+                _to_blob(m.embedding),
             )
+            for id_, m in zip(ids, embedded_memories)
+        ]
+        with _lock:
+            db = _db()
+            db.executemany(
+                f"INSERT INTO memories (id, {_META_SQL}, embedding) "
+                f"VALUES ({','.join('?' * (len(_META_COLS) + 2))})",
+                rows,
+            )
+            db.commit()
+            _bump()
         return ids
     return await asyncio.to_thread(_add)
 
@@ -146,17 +222,38 @@ async def delete_user_records(user_id: int):
     """Forget a user completely: memories, core profile AND raw transcripts —
     the transcripts are searched on every query, so leaving them is not forgetting."""
     def _delete():
-        with _write_lock:
-            _get_collection().delete(where={"user_id": {"$eq": user_id}})
+        with _lock:
+            db = _db()
+            db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+            db.commit()
+            _bump()
         delete_transcripts(user_id)
     await asyncio.to_thread(_delete)
 
 
 async def delete_records(point_ids: List[str]):
     def _delete():
-        with _write_lock:
-            _get_collection().delete(ids=point_ids)
+        if not point_ids:
+            return
+        with _lock:
+            db = _db()
+            db.execute(
+                f"DELETE FROM memories WHERE id IN ({','.join('?' * len(point_ids))})",
+                point_ids,
+            )
+            db.commit()
+            _bump()
     await asyncio.to_thread(_delete)
+
+
+def _update_meta_sync(point_id: str, updates: dict):
+    with _lock:
+        db = _db()
+        cols = ", ".join(f"{k} = ?" for k in updates)
+        db.execute(f"UPDATE memories SET {cols} WHERE id = ?",
+                   [*updates.values(), point_id])
+        db.commit()
+        _bump()
 
 
 async def mark_reconciled(point_ids: List[str]):
@@ -166,37 +263,16 @@ async def mark_reconciled(point_ids: List[str]):
     def _mark():
         if not point_ids:
             return
-        col = _get_collection()
-        with _write_lock:
-            hit = col.get(ids=point_ids, include=["metadatas", "embeddings", "documents"])
-            for meta in hit["metadatas"]:
-                meta["reconciled"] = 1
-            if hit["ids"]:
-                col.upsert(ids=hit["ids"], embeddings=hit["embeddings"],
-                           metadatas=hit["metadatas"], documents=hit["documents"])
+        with _lock:
+            db = _db()
+            db.execute(
+                f"UPDATE memories SET reconciled = 1 "
+                f"WHERE id IN ({','.join('?' * len(point_ids))})",
+                point_ids,
+            )
+            db.commit()
+            _bump()
     await asyncio.to_thread(_mark)
-
-
-def _update_meta_locked(point_id: str, updates: dict):
-    """Re-upsert a record with modified metadata (ChromaDB has no partial update).
-    Caller must already hold _write_lock."""
-    col = _get_collection()
-    result = col.get(ids=[point_id], include=["metadatas", "embeddings", "documents"])
-    if not result["ids"]:
-        return  # already gone
-    meta = result["metadatas"][0]
-    meta.update(updates)
-    col.upsert(
-        ids=[point_id],
-        embeddings=[result["embeddings"][0]],
-        metadatas=[meta],
-        documents=[result["documents"][0]],
-    )
-
-
-def _update_meta_sync(point_id: str, updates: dict):
-    with _write_lock:
-        _update_meta_locked(point_id, updates)
 
 
 async def mark_memory_old(point_id: str):
@@ -214,20 +290,24 @@ async def mark_memory_old(point_id: str):
 async def add_links(point_id: str, linked_ids: List[str]):
     """Record bidirectional links between a memory and related memories (A-Mem)."""
     def _link():
-        col = _get_collection()
         for a, b in [(point_id, lid) for lid in linked_ids if lid != point_id]:
             for src, dst in ((a, b), (b, a)):
                 # read and write under ONE lock: releasing between them let a
                 # concurrent link add overwrite the list this one just read
-                with _write_lock:
-                    result = col.get(ids=[src], include=["metadatas"])
-                    if not result["ids"]:
+                with _lock:
+                    db = _db()
+                    row = db.execute("SELECT links FROM memories WHERE id = ?",
+                                     (src,)).fetchone()
+                    if row is None:
                         continue
-                    existing = set(filter(None, result["metadatas"][0].get("links", "").split(",")))
+                    existing = set(filter(None, row["links"].split(",")))
                     if dst in existing:
                         continue
                     existing.add(dst)
-                    _update_meta_locked(src, {"links": ",".join(sorted(existing))})
+                    db.execute("UPDATE memories SET links = ? WHERE id = ?",
+                               (",".join(sorted(existing)), src))
+                    db.commit()
+                    _bump()
     await asyncio.to_thread(_link)
 
 
@@ -236,7 +316,7 @@ async def set_context(point_id: str, context: str):
     await asyncio.to_thread(_update_meta_sync, point_id, {"context": context})
 
 
-# read operations 
+# read operations
 
 _EPOCH = datetime(1970, 1, 1)
 
@@ -252,7 +332,7 @@ def to_epoch(iso: str) -> float:
 
 def kind_of(meta) -> str:
     """Memory kind, with backfill for records written before the field existed."""
-    if "kind" in meta:
+    if meta.get("kind"):
         return meta["kind"]
     return "summary" if "session_summary" in meta.get("categories", "") else "fact"
 
@@ -278,6 +358,67 @@ def _build_retrieved(id_, metadata, score, linked=False) -> RetrievedMemory:
         links=list(filter(None, metadata.get("links", "").split(","))),
         linked=linked,
     )
+
+
+def _corpus(user_id: int, include_old: bool, categories) -> dict:
+    """Everything a search needs over a user's memories: ids, metadata, the
+    normalised vector matrix, the BM25 index and the link graph.
+
+    Cached until the next write. A `categories` filter bypasses the cache
+    (nothing in the codebase passes one, so it is not worth a second key)."""
+    key = (user_id, include_old)
+    with _lock:
+        cached = _corpus_cache.get(key)
+        if cached is not None and cached["version"] == _write_version and not categories:
+            return cached
+        sql = (f"SELECT id, {_META_SQL}, embedding FROM memories "
+               f"WHERE user_id = ? AND type != 'core'")
+        if not include_old:
+            sql += " AND is_current = 1"
+        rows = _db().execute(sql, (user_id,)).fetchall()
+        version = _write_version
+
+    ids, eligible, blobs = [], {}, []
+    for row in rows:
+        meta = {k: row[k] for k in _META_COLS}
+        if categories:
+            stored_cats = [c.strip() for c in meta["categories"].split(",")]
+            if not any(c in stored_cats for c in categories):
+                continue
+        ids.append(row["id"])
+        eligible[row["id"]] = (meta, meta["memory_text"])
+        blobs.append(row["embedding"])
+
+    matrix, bm25 = None, None
+    if ids:
+        matrix = np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(ids), -1)
+        matrix = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9)
+        # BM25 indexes content + keywords + context, not just the memory text
+        enriched = [
+            eligible[i][1] + " "
+            + eligible[i][0]["keywords"].replace(",", " ") + " "
+            + eligible[i][0]["context"]
+            for i in ids
+        ]
+        bm25 = BM25Okapi([_tokenize(t) for t in enriched])
+
+    graph = nx.Graph()
+    for id_ in ids:
+        for target in filter(None, eligible[id_][0]["links"].split(",")):
+            if target in eligible:
+                graph.add_edge(id_, target)
+
+    corpus = {"version": version, "ids": ids, "eligible": eligible,
+              "matrix": matrix, "bm25": bm25, "graph": graph}
+    if not categories:
+        with _lock:
+            _corpus_cache[key] = corpus
+            # Keep only the few most recent. A chat session touches one or two
+            # corpora, but the eval harness runs dozens of users through this
+            # process and would otherwise hold every one of them in memory.
+            while len(_corpus_cache) > CORPUS_CACHE_SIZE:
+                _corpus_cache.pop(next(iter(_corpus_cache)))
+    return corpus
 
 
 async def search_memories(
@@ -315,71 +456,31 @@ async def search_memories(
         touch: If True (default), hits are "rehearsed" — last_accessed resets
             and strength grows, which changes future rankings. Pass False for
             read-only lookups (browsing, evals, diagnostics).
-
-    NOTE: ChromaDB 1.4.x metadata filters only support
-    $eq / $ne / $gt / $gte / $lt / $lte / $in / $nin.
-    `$contains` is NOT supported for metadata fields.
-
-    We therefore filter by `user_id` (supported) and apply
-    the optional `categories` / `is_current` checks client-side.
     """
     def _search():
-        col = _get_collection()
-        where: dict = {"user_id": {"$eq": user_id}}
-
-        # Full candidate pool for this user (client-side filters)
-        all_recs = col.get(where=where, include=["metadatas", "documents"])
-        eligible: dict = {}
-        for id_, meta, doc in zip(all_recs["ids"], all_recs["metadatas"], all_recs["documents"]):
-            # Core profile record is injected into every prompt, not searched
-            if meta.get("type") == "core":
-                continue
-            if not include_old and int(meta.get("is_current", 1)) == 0:
-                continue
-            if categories:
-                stored_cats = [c.strip() for c in meta["categories"].split(",")]
-                if not any(c in stored_cats for c in categories):
-                    continue
-            eligible[id_] = (meta, doc)
-        if not eligible:
+        # Candidate pool: the core profile is injected into every prompt rather
+        # than searched, and superseded memories are excluded unless asked for.
+        corpus = _corpus(user_id, include_old, categories)
+        ids, eligible = corpus["ids"], corpus["eligible"]
+        if not ids:
             return []
 
         fetch_k = max(top_k * 6, 30)
 
-        # Vector ranking
+        # Vector ranking: cosine similarity, brute force over the eligible rows
         vec_rank = []
         try:
-            # ask for the ineligible ones on top: they are filtered out below,
-            # and without the headroom a store full of superseded memories
-            # returns almost nothing
-            ineligible = len(all_recs["ids"]) - len(eligible)
-            results = col.query(
-                query_embeddings=[search_vector],
-                n_results=min(fetch_k + ineligible, len(all_recs["ids"])),
-                where=where,
-                include=["distances"],
-            )
-            for id_, dist in zip(results["ids"][0], results["distances"][0]):
-                # ChromaDB cosine distance is 1 - similarity: 0 identical,
-                # 1 unrelated, 2 opposite. Halving it rated unrelated memories
-                # 0.5 and let everything through the floor.
-                if id_ in eligible and 1.0 - dist >= RELEVANCE_FLOOR:
-                    vec_rank.append(id_)
+            q = np.asarray(search_vector, dtype=np.float32)
+            sims = corpus["matrix"] @ (q / (np.linalg.norm(q) + 1e-9))
+            order = np.argsort(-sims)[:fetch_k]
+            vec_rank = [ids[i] for i in order if sims[i] >= RELEVANCE_FLOOR]
         except Exception as e:
             log.warning("vector search failed, falling back to keyword ranking: %s", e)
 
         # BM25 keyword ranking over enriched note text (content + keywords + context)
         bm25_rank = []
-        if query_text:
-            ids = list(eligible)
-            enriched = [
-                eligible[i][1] + " "
-                + eligible[i][0].get("keywords", "").replace(",", " ") + " "
-                + eligible[i][0].get("context", "")
-                for i in ids
-            ]
-            bm25 = BM25Okapi([_tokenize(t) for t in enriched])
-            scores = bm25.get_scores(_tokenize(query_text))
+        if query_text and corpus["bm25"] is not None:
+            scores = corpus["bm25"].get_scores(_tokenize(query_text))
             ranked = sorted(zip(ids, scores), key=lambda x: x[1], reverse=True)
             bm25_rank = [i for i, s in ranked if s > 0][:fetch_k]
 
@@ -387,11 +488,7 @@ async def search_memories(
         # surfaces memories connected to what matched, even if they didn't match
         ppr_rank = []
         seeds = list(dict.fromkeys(vec_rank + bm25_rank))[:PPR_SEEDS] if USE_PPR else []
-        graph = nx.Graph()
-        for id_, (meta, _) in eligible.items():
-            for target in filter(None, meta.get("links", "").split(",")):
-                if target in eligible:
-                    graph.add_edge(id_, target)
+        graph = corpus["graph"]
         if seeds and graph.number_of_edges() > 0:
             personalization = {n: (1.0 if n in seeds else 0.0) for n in graph.nodes}
             if any(personalization.values()):
@@ -418,8 +515,8 @@ async def search_memories(
         scored = []
         for id_, fused in rrf.items():
             meta = eligible[id_][0]
-            last_accessed = float(meta.get("last_accessed", meta.get("timestamp", now)))
-            strength = float(meta.get("strength", STRENGTH_INIT))
+            last_accessed = float(meta.get("last_accessed") or meta.get("timestamp") or now)
+            strength = float(meta.get("strength") or STRENGTH_INIT)
             retention = math.exp(-((now - last_accessed) / 86400.0) / strength)
             importance = int(meta.get("importance", 5)) / 10.0
             stale = STALE_PENALTY if int(meta.get("is_current", 1)) == 0 else 0.0
@@ -436,18 +533,23 @@ async def search_memories(
 
         # Touch winners: recency resets and strength grows (Ebbinghaus rehearsal)
         if top and touch:
-            with _write_lock:
-                hit = col.get(ids=[id_ for _, id_, _ in top],
-                              include=["metadatas", "embeddings", "documents"])
-                for meta in hit["metadatas"]:
-                    meta["last_accessed"] = now
-                    meta["strength"] = float(meta.get("strength", STRENGTH_INIT)) + STRENGTH_PER_RECALL
-                col.upsert(
-                    ids=hit["ids"],
-                    embeddings=hit["embeddings"],
-                    metadatas=hit["metadatas"],
-                    documents=hit["documents"],
+            rehearsed = [
+                (now, float(meta.get("strength") or STRENGTH_INIT) + STRENGTH_PER_RECALL, id_, meta)
+                for _, id_, meta in top
+            ]
+            with _lock:
+                db = _db()
+                db.executemany(
+                    "UPDATE memories SET last_accessed = ?, strength = ? WHERE id = ?",
+                    [(a, s, i) for a, s, i, _ in rehearsed],
                 )
+                db.commit()
+                # Rehearsal touches only these two fields, so update the cached
+                # metadata in place rather than throwing the whole corpus away —
+                # otherwise every search would invalidate the cache it just built.
+                for accessed, strength_, _, meta in rehearsed:
+                    meta["last_accessed"] = accessed
+                    meta["strength"] = strength_
 
         out = [_build_retrieved(id_, meta, score) for score, id_, meta in top]
 
@@ -467,14 +569,20 @@ async def search_memories(
 
 
 async def fetch_user_records_raw(user_id: int, include_embeddings: bool = True) -> dict:
-    """Raw ChromaDB dump for a user — used by consolidation. Only dedup needs the
+    """Raw dump for a user — used by consolidation. Only dedup needs the
     embeddings; every other stage was paying 384 floats per record for nothing."""
     def _fetch():
-        col = _get_collection()
-        include = ["metadatas", "documents"]
-        if include_embeddings:
-            include.append("embeddings")
-        return col.get(where={"user_id": {"$eq": user_id}}, include=include)
+        cols = f"id, {_META_SQL}" + (", embedding" if include_embeddings else "")
+        with _lock:
+            rows = _db().execute(
+                f"SELECT {cols} FROM memories WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        return {
+            "ids": [r["id"] for r in rows],
+            "metadatas": [{k: r[k] for k in _META_COLS} for r in rows],
+            "documents": [r["memory_text"] for r in rows],
+            "embeddings": [_from_blob(r["embedding"]) for r in rows] if include_embeddings else None,
+        }
     return await asyncio.to_thread(_fetch)
 
 
@@ -482,67 +590,62 @@ async def fetch_user_records_raw(user_id: int, include_embeddings: bool = True) 
 
 async def get_core_memory(user_id: int) -> str:
     def _get():
-        col = _get_collection()
-        result = col.get(ids=[f"core_{user_id}"], include=["documents"])
-        return result["documents"][0] if result["ids"] else ""
+        with _lock:
+            row = _db().execute(
+                "SELECT memory_text FROM memories WHERE id = ?", (f"core_{user_id}",)
+            ).fetchone()
+        return row["memory_text"] if row else ""
     return await asyncio.to_thread(_get)
 
 
 async def set_core_memory(user_id: int, text: str, embedding: List[float]):
     def _set():
-        col = _get_collection()
         now = datetime.now()
-        col.upsert(
-            ids=[f"core_{user_id}"],
-            embeddings=[embedding],
-            metadatas=[{
-                "user_id":     user_id,
-                "type":        "core",
-                "memory_text": text,
-                "categories":  "core",
-                "date":        now.isoformat(),
-                "timestamp":   now.timestamp(),
-                "saved_at":    now.isoformat(),
-                "is_current":  1,
-            }],
-            documents=[text],
-        )
+        with _lock:
+            db = _db()
+            db.execute(
+                "INSERT INTO memories (id, user_id, memory_text, categories, date, "
+                "timestamp, saved_at, is_current, type, embedding) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET memory_text=excluded.memory_text, "
+                "date=excluded.date, timestamp=excluded.timestamp, "
+                "saved_at=excluded.saved_at, embedding=excluded.embedding",
+                (f"core_{user_id}", user_id, text, "core", now.isoformat(),
+                 now.timestamp(), now.isoformat(), 1, "core", _to_blob(embedding)),
+            )
+            db.commit()
+            _bump()
     await asyncio.to_thread(_set)
 
 
 async def fetch_all_user_records(user_id: int) -> List[RetrievedMemory]:
     def _fetch():
-        col = _get_collection()
-        results = col.get(
-            where={"user_id": {"$eq": user_id}},
-            include=["metadatas"],
-        )
-        return [
-            _build_retrieved(id_, meta, 0.0)
-            for id_, meta in zip(results["ids"], results["metadatas"])
-            if meta.get("type") != "core"
-        ]
+        with _lock:
+            rows = _db().execute(
+                f"SELECT id, {_META_SQL} FROM memories "
+                f"WHERE user_id = ? AND type != 'core'", (user_id,)
+            ).fetchall()
+        return [_build_retrieved(r["id"], {k: r[k] for k in _META_COLS}, 0.0) for r in rows]
     return await asyncio.to_thread(_fetch)
 
 
 async def get_all_categories(user_id: int) -> List[str]:
     def _fetch():
-        col = _get_collection()
-        results = col.get(
-            where={"user_id": {"$eq": user_id}},
-            include=["metadatas"],
-        )
+        with _lock:
+            rows = _db().execute(
+                "SELECT categories FROM memories WHERE user_id = ? AND type != 'core'",
+                (user_id,),
+            ).fetchall()
         seen = set()
-        for meta in results["metadatas"]:
-            if meta.get("type") == "core":
-                continue
-            for cat in meta["categories"].split(","):
-                seen.add(cat.strip())
+        for row in rows:
+            for cat in row["categories"].split(","):
+                if cat.strip():
+                    seen.add(cat.strip())
         return sorted(seen)
     return await asyncio.to_thread(_fetch)
 
 
-# display helper 
+# display helper
 
 def stringify_retrieved_point(retrieved_memory: RetrievedMemory) -> str:
     status_tag = "" if retrieved_memory.is_current else " [OLD/SUPERSEDED]"

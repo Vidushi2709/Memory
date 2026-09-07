@@ -1,5 +1,10 @@
 .env
-chroma_db
 __pycache__
-transcripts
+chroma_db
 eval/data
+memory.db
+memory.db-shm
+memory.db-wal
+models
+transcripts
+.pytest_cache

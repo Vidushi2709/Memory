@@ -1,0 +1,114 @@
+[
+  {
+    "scenario": "single_hop_basics",
+    "category": "single-hop",
+    "question": "What's my dog's name?",
+    "expected": "Bruno",
+    "answer": "Your dog's name is Bruno! He's a golden retriever, right?",
+    "correct": true
+  },
+  {
+    "scenario": "single_hop_basics",
+    "category": "single-hop",
+    "question": "What do I do for work?",
+    "expected": "pediatric nurse",
+    "answer": "You work as a pediatric nurse.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_city",
+    "category": "update",
+    "question": "Where do I live?",
+    "expected": "Bangalore",
+    "answer": "You currently live in Bangalore. You used to live in Delhi.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_city",
+    "category": "temporal",
+    "question": "Where did I live before?",
+    "expected": "Delhi",
+    "answer": "You used to live in Delhi.",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_job",
+    "category": "update",
+    "question": "Where do I work these days?",
+    "expected": "Zomato, as a delivery ops manager",
+    "answer": "You're currently a delivery ops manager at Zomato!",
+    "correct": true
+  },
+  {
+    "scenario": "knowledge_update_job",
+    "category": "temporal",
+    "question": "What was my old job?",
+    "expected": "barista at Blue Tokai",
+    "answer": "You used to work as a barista at Blue Tokai.",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_trip",
+    "category": "multi-hop",
+    "question": "What gear have I bought for my December trip?",
+    "expected": "Quechua boots, bought to prepare for the Kedarkantha trek",
+    "answer": "You've bought new Quechua boots for your December trek to Kedarkantha!",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_friend",
+    "category": "multi-hop",
+    "question": "Why are we going to celebrate in Goa?",
+    "expected": "to celebrate Zubin's new job as a pilot",
+    "answer": "We were planning to go to Goa to celebrate Zubin's new job as a pilot with Indigo!",
+    "correct": true
+  },
+  {
+    "scenario": "multi_hop_friend",
+    "category": "exact-token",
+    "question": "What does Zubin do?",
+    "expected": "pilot with Indigo",
+    "answer": "Zubin is a pilot with Indigo!",
+    "correct": true
+  },
+  {
+    "scenario": "temporal_dates",
+    "category": "temporal",
+    "question": "Roughly when did I adopt Mochi?",
+    "expected": "around June 2026 (two months before the conversation)",
+    "answer": "You adopted Mochi two months ago!",
+    "correct": true
+  },
+  {
+    "scenario": "abstention",
+    "category": "abstention",
+    "question": "What's my favorite movie?",
+    "expected": "ABSTAIN",
+    "answer": "I don't have any information about your favorite movie in my memory.",
+    "correct": true
+  },
+  {
+    "scenario": "abstention",
+    "category": "abstention",
+    "question": "What car do I drive?",
+    "expected": "ABSTAIN",
+    "answer": "I don't have any information about the car you drive.",
+    "correct": true
+  },
+  {
+    "scenario": "preference_details",
+    "category": "single-hop",
+    "question": "Can you suggest a snack for me?",
+    "expected": "a vegetarian, peanut-free suggestion that respects the allergy",
+    "answer": "Since you're vegetarian and have a serious peanut allergy, how about some apple slices with almond butter? It's a tasty and safe option!",
+    "correct": false
+  },
+  {
+    "scenario": "counting_events",
+    "category": "aggregation",
+    "question": "How many concerts have I been to?",
+    "expected": "2",
+    "answer": "You've been to 2 concerts recently: one by Prateek Kuhad and another by a small indie band.",
+    "correct": true
+  }
+]

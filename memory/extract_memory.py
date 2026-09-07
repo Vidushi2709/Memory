@@ -252,3 +252,71 @@ if __name__ == "__main__":
     existing_categories = ["name", "hobbies"]
     result = asyncio.run(extract_memory(messages, existing_categories))
     print("Memories:", result)
+
+class WorkLogExtractor(dspy.Signature):
+    """Extract only DURABLE facts about the user from a working session — a
+    transcript of them building something with an AI coding assistant.
+
+    Keep what will still be true and worth knowing weeks from now:
+      - standing preferences and working style ("always branch before starting
+        work", "PRs need a description, type of change and testing section")
+      - rules and corrections the user gave the assistant, especially ones
+        phrased as "always", "never", "from now on", or given as a rebuke
+      - what they are building, and the decisions and constraints behind it:
+        an architecture settled on, a library chosen or rejected and why
+      - tools, accounts, models, hardware and keys they do or do not have
+      - their role, expertise, and the projects they own
+
+    Discard everything transient, which is most of a working session. A single
+    task instruction ("run the tests", "create a branch", "fix this error"),
+    the state of one debugging session, what a command printed, a number that
+    was true only that afternoon, and anything already superseded by the end of
+    the same conversation are NOT memories. When a session is pure task
+    execution with nothing durable in it, set no_info to True and return an
+    empty list — that is the common and correct outcome, not a failure.
+
+    Write each fact to stand alone weeks later, naming the project it belongs
+    to. Not "User wants to add a pipecat path", which means nothing out of
+    context, but "User is building an ETL agent in the NovaEval project that
+    maps pipecat traces, mirroring an existing livekit path."
+
+    Rate importance 1-10: a standing rule about how they want to work is high,
+    a passing detail about one file is low. Resolve relative dates against
+    current_date. Set status to happened, planned, considered or ongoing —
+    a standing preference is ongoing. Give 2-5 salient keywords and a context
+    line of at most 10 words. Set about_user False for general programming
+    knowledge and for the assistant's own explanations and suggestions.
+    """
+
+    transcript: str = dspy.InputField(desc="The working session transcript.")
+    current_date: str = dspy.InputField(desc="Today's ISO date, for resolving relative dates.")
+    existing_categories: List[str] = dspy.InputField(
+        desc="Memory categories already stored for this user."
+    )
+    no_info: bool = dspy.OutputField(
+        desc="True if the session holds no durable fact about the user."
+    )
+    new_memories: List[Memory] = dspy.OutputField(
+        desc="Durable facts only. Same fields as a first-pass memory."
+    )
+
+
+worklog_extractor = dspy.Predict(WorkLogExtractor)
+
+
+async def extract_worklog(messages, categories=None, current_date=None):
+    """Extraction lens for coding-assistant sessions, where most of the
+    transcript is transient task execution rather than anything to remember."""
+    transcript = json.dumps(messages)
+    date = current_date or datetime.now().date().isoformat()
+    for max_tokens in (MEMORY_MAX_TOKENS, MEMORY_MAX_TOKENS_RETRY):
+        lm = get_lm(max_tokens=max_tokens)
+        with dspy.context(lm=lm):
+            out = await worklog_extractor.acall(
+                transcript=transcript, current_date=date,
+                existing_categories=categories or [],
+            )
+        if not was_truncated(lm):
+            return out
+        log.warning("worklog extraction hit the %d-token cap; retrying larger", max_tokens)
+    return out

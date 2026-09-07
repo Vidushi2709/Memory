@@ -1,9 +1,10 @@
 import logging
+import os
 from datetime import datetime
 import dspy
 import numpy as np
 from memory.embedding_generation import generate_embeddings
-from memory.extract_memory import extract_memory, extract_missed, Memory
+from memory.extract_memory import extract_memory, extract_missed, extract_worklog, Memory
 from memory.memory_store import (
     EmbeddedMemory,
     add_memory,
@@ -17,6 +18,24 @@ log = logging.getLogger(__name__)
 # a "missed" fact this similar to a stored one would only be merged back later,
 # so don't store it at all.
 GAP_DUP_SIMILARITY = 0.9
+
+
+def min_importance() -> int:
+    """Admission control: facts the extractor scored below this are never stored.
+
+    0 (the default) stores everything, which is what every other memory system
+    does. Above 0 the write path throws work away on purpose, trading a little
+    write-path loss (the answer was never stored) for less retrieval loss
+    (search_memories has five slots and every junk fact competes for them).
+
+    Read from the environment on every call, not at import, so an eval sweep can
+    move the threshold between runs in the same process.
+    """
+    try:
+        return int(os.getenv("MEMORY_MIN_IMPORTANCE", "0"))
+    except ValueError:
+        return 0
+
 
 load_dotenv()
 
@@ -88,7 +107,9 @@ async def _completeness_pass(
         if out is None or out.nothing_missed or not out.missed_memories:
             return 0
 
-        fresh = [f for f in out.missed_memories if f.about_user]
+        floor = min_importance()
+        fresh = [f for f in out.missed_memories
+                 if f.about_user and (f.importance or 0) >= floor]
         if not fresh:
             return 0
 
@@ -135,19 +156,21 @@ async def _completeness_pass(
 EXTRACT_ATTEMPTS = 3
 
 
-async def _extract_with_retry(messages, categories, current_date):
+async def _extract_with_retry(messages, categories, current_date, lens="life"):
     """Structured-output parsing fails intermittently on every model we have
     tried. A dropped extraction silently loses a whole session, so retry."""
     last = None
     for attempt in range(EXTRACT_ATTEMPTS):
         try:
-            return await extract_memory(messages, categories, current_date or None)
+            fn = extract_worklog if lens == "work" else extract_memory
+            return await fn(messages, categories, current_date or None)
         except Exception as e:
             last = e
     raise last
 
 
-async def update_memories(user_id: int, messages: list[dict], session_id: str = "", current_date: str = ""):
+async def update_memories(user_id: int, messages: list[dict], session_id: str = "",
+                          current_date: str = "", lens: str = "life"):
     """
     Thin write path: extract facts and store them append-only, one LLM call total.
 
@@ -157,7 +180,7 @@ async def update_memories(user_id: int, messages: list[dict], session_id: str = 
     whole session at once instead of many small calls compounding errors.
     """
     categories = await get_all_categories(user_id=user_id)
-    extracted = await _extract_with_retry(messages, categories, current_date)
+    extracted = await _extract_with_retry(messages, categories, current_date, lens)
 
     if extracted.no_info or not extracted.new_memories:
         return "No new facts."
@@ -166,19 +189,32 @@ async def update_memories(user_id: int, messages: list[dict], session_id: str = 
     # the user — stored, they steal retrieval slots from the facts that are
     facts = [f for f in extracted.new_memories if f.about_user]
     dropped = len(extracted.new_memories) - len(facts)
+
+    # admission control — see min_importance() above; off unless the env var is set
+    floor = min_importance()
+    rejected = 0
+    if floor:
+        kept = [f for f in facts if (f.importance or 0) >= floor]
+        rejected = len(facts) - len(kept)
+        facts = kept
+
     if not facts:
         return "No new facts."
     dates = [_safe_date(f.date, current_date) for f in facts]
     await _store_all(user_id, facts, dates, session_id)
 
-    recovered = await _completeness_pass(
-        user_id, messages, facts, categories, session_id, current_date
-    )
+    recovered = 0
+    if lens != "work":
+        recovered = await _completeness_pass(
+            user_id, messages, facts, categories, session_id, current_date
+        )
 
     n = len(facts)
     msg = f"{n} fact(s) noted"
     if dropped:
         msg += f" ({dropped} general-knowledge dropped)"
+    if rejected:
+        msg += f" ({rejected} below importance {floor})"
     if recovered:
         msg += f" (+{recovered} recovered by gap check)"
     return msg

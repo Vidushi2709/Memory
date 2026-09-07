@@ -1,6 +1,6 @@
 # 🧠 Memory — Persistent AI Memory System
 
-A lightweight, **LLM-powered memory layer** that lets an AI chatbot remember things about you across sessions. Memories are stored as vector embeddings in ChromaDB and retrieved semantically, so the AI finds the right memories even when you don't use exact wording.
+A lightweight, **LLM-powered memory layer** that lets an AI chatbot remember things about you across sessions. Memories are stored as vector embeddings in a single SQLite file and retrieved semantically, so the AI finds the right memories even when you don't use exact wording.
 
 ---
 
@@ -8,7 +8,7 @@ A lightweight, **LLM-powered memory layer** that lets an AI chatbot remember thi
 
 | Feature | Description |
 |---|---|
-| **Persistent memory** | All memories saved to disk (`./chroma_db`) — survive restarts |
+| **Persistent memory** | All memories in one SQLite file (`memory.db`) — no server process, backups are a file copy |
 | **Hybrid retrieval** | Vector similarity + BM25 keyword search fused with reciprocal rank fusion (Zep-style), then ranked by relevance + retention + importance |
 | **Ebbinghaus forgetting** | Retention `e^(−t/S)` demotes stale memories in ranking — never deletes them; strength `S` grows each time a memory is recalled |
 | **Thin write path** | One extraction call per exchange stores facts append-only; all judgment-heavy reconciliation happens off the hot path |
@@ -39,7 +39,7 @@ A lightweight, **LLM-powered memory layer** that lets an AI chatbot remember thi
 Memory/
 ├── chatbot.py              ← Main chatbot (run this)
 ├── .env                    ← API keys (never commit)
-├── chroma_db/              ← Persistent vector store (auto-created)
+├── memory.db               ← The whole store: one SQLite file (auto-created)
 ├── transcripts/            ← Raw session logs, one JSONL per user (auto-created)
 ├── eval/                   ← Eval harnesses
 │   ├── scenarios.py              ← scripted conversations + expected answers
@@ -51,7 +51,7 @@ Memory/
     ├── __init__.py
     ├── embedding_generation.py   ← Embeds text → float vectors
     ├── extract_memory.py         ← LLM extracts structured memories (+ keywords, context)
-    ├── memory_store.py           ← ChromaDB read/write + hybrid/graph search
+    ├── memory_store.py           ← SQLite read/write + hybrid/graph search
     ├── consolidate.py            ← dedup merge, reflection insights, memory evolution
     ├── transcripts.py            ← raw experience bank (JSONL per user)
     └── update_memory.py          ← per-fact ADD/UPDATE/SUPERSEDE/NOOP + linking
@@ -64,7 +64,7 @@ Memory/
 ### 1. Install dependencies
 
 ```bash
-pip install dspy chromadb sentence-transformers rank-bm25 networkx pydantic python-dotenv rich
+pip install -r requirements.txt
 ```
 
 ### 2. Set your API key
@@ -72,10 +72,10 @@ pip install dspy chromadb sentence-transformers rank-bm25 networkx pydantic pyth
 Create a `.env` file in the project root:
 
 ```
-OPEN_ROUTER_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
 ```
 
-> The project uses `mistralai/mistral-small-3.2-24b-instruct` via [OpenRouter](https://openrouter.ai) by default. Get a key at [openrouter.ai/keys](https://openrouter.ai/keys).
+> The project uses **Gemini 2.5 Flash-Lite**, which is free on a [Google AI Studio key](https://aistudio.google.com/apikey) — measured the fastest of every candidate on both memory workloads. Without `GEMINI_API_KEY` it falls back to the same model through [OpenRouter](https://openrouter.ai) (about $1/month at personal volume).
 
 ### 3. Run the chatbot
 
@@ -158,15 +158,15 @@ User message
                   → dedup-merge → evolve contexts → reflect → core profile
                               │
                               ▼
-                    [ChromaDB persists to disk]
+                    [SQLite persists to disk]
                     (old memories kept with is_current=0)
 ```
 
 ### Memory lifecycle
 
 1. **Extraction (the only hot-path LLM call)** — `extract_memory.py` pulls structured facts from conversation turns (text, category, importance 1-10, keywords, context sentence, and the ISO date the fact became true — relative dates are resolved against the conversation's date). Facts are stored **append-only**; no judgment happens while the user waits.
-2. **Embedding** — `embedding_generation.py` converts memory text to a 384-dim vector using `all-MiniLM-L6-v2`.
-3. **Storage** — `memory_store.py` upserts into ChromaDB with `user_id`, `saved_at`, `importance`, `last_accessed`, and `is_current=1` metadata. Raw exchanges are appended to `transcripts/` in parallel.
+2. **Embedding** — `embedding_generation.py` converts memory text to a 384-dim vector using `all-MiniLM-L6-v2` through fastembed (ONNX, no torch: 197 MB resident and a 13 s cold start, against 1.4 GB and 54 s before).
+3. **Storage** — `memory_store.py` inserts into SQLite with `user_id`, `saved_at`, `importance`, `last_accessed`, and `is_current=1` columns. Raw exchanges are appended to `transcripts/` in parallel.
 4. **Retrieval** — On every message, vector-similarity and BM25 keyword rankings are fused with reciprocal rank fusion, then re-ranked by `relevance + retention + importance` where retention is `e^(−days_since_recall / strength)` (strength grows on every recall). Old memories are always searchable, tagged `[OLD/SUPERSEDED]`, and raw transcript exchanges are BM25-searched alongside (tagged `[PAST CONVERSATION]`).
 5. **Sleep pass (session end)** — `consolidate.py: sleep_pass` holds all write authority over consolidated memory: one large-context call reconciles the session's new facts against the store (supersede changed facts / link related ones), then dedup-merge, context evolution, reflection, and the core-profile rewrite run. Fewer, bigger LLM calls instead of many per-fact ones — judgment errors no longer compound across 7+ decisions per fact on the hot path.
 6. **Core memory** — a short user profile stored per user and injected into *every* prompt, so key facts (name, location, work) never depend on retrieval. Rewritten only by the sleep pass.
@@ -199,7 +199,7 @@ Result: 12/13 without PPR vs 13/13 with — but the one failure wasn't a retriev
 
 Memories are **never hard-deleted** when updated. Instead, the old version is marked `is_current=0` (superseded), and a new current memory is added. This means:
 
-- The full **history of changes** is preserved in ChromaDB.
+- The full **history of changes** is preserved in the database.
 - The AI can answer questions like **"where did I live before?"** or **"what was my old job?"** by looking up superseded memories.
 - The `/memories` table shows both `Current` and `Old` entries with their saved timestamps.
 
@@ -214,7 +214,7 @@ You: Where did I live before?  → same retrieval
                                 → "You used to live in Delhi, and now live in Bangalore."
 ```
 
-### Memory metadata stored in ChromaDB
+### Columns stored per memory
 
 | Field | Description |
 |---|---|
@@ -242,11 +242,14 @@ You: Where did I live before?  → same retrieval
 | Setting | Location | Default |
 |---|---|---|
 | LLM model | `chatbot.py` → `_lm` | `openrouter/mistralai/mistral-small-3.2-24b-instruct` |
-| Embedding model | `memory/embedding_generation.py` | `all-MiniLM-L6-v2` (384-dim) |
-| DB path | `memory/memory_store.py` | `./chroma_db` |
+| Embedding model | `memory/embedding_generation.py` → `MEMORY_EMBED_MODEL` | `all-MiniLM-L6-v2` (384-dim) via fastembed/ONNX |
+| Data dir | `MEMORY_DIR` env (default: repo root) | holds `memory.db`, `transcripts/` and `models/`; the evals point it at a temp dir |
+| LLM | `memory/llm.py` → `MEMORY_MODEL` / `MEMORY_CHAT_MODEL` | `gemini/gemini-2.5-flash-lite` when `GEMINI_API_KEY` is set (free tier), else the same model via OpenRouter |
+| Request throttle | `memory/llm.py` → `MEMORY_RPM` | `0` (off). Set `10` on a **free** Gemini key — that tier allows 10 requests/min and only 20/day per model |
 | Relevance floor | `memory/memory_store.py` → `RELEVANCE_FLOOR` | `0.10` true cosine (vector ranking only — BM25 hits bypass it). Calibrated: a question and the memory answering it can sit at 0.15 |
 | Retrieval ranking | `memory/memory_store.py` → `search_memories` | `RRF(vector, BM25, PageRank) + 0.10·e^(−days/strength) + 0.15·importance/10 − 0.30 if superseded` |
 | Ebbinghaus strength | `memory/memory_store.py` → `STRENGTH_INIT` / `STRENGTH_PER_RECALL` | `5.0` / `1.0` |
+| Admission floor | `memory/update_memory.py` → `MEMORY_MIN_IMPORTANCE` | `0` (store everything). Above 0 the write path refuses facts scored below it — see `eval/sweep_admission.py` |
 | Dedup similarity | `memory/consolidate.py` → `DEDUP_SIMILARITY` | `0.9` |
 | Reflection trigger | `memory/consolidate.py` → `REFLECTION_THRESHOLD` | `40` (summed importance of fresh facts) |
 | Link expansion cap | `memory/memory_store.py` → `LINK_EXPANSION_CAP` | `3` linked memories per query |
@@ -263,9 +266,9 @@ You: Where did I live before?  → same retrieval
 
 | Package | Purpose |
 |---|---|
-| `dspy` | LLM orchestration, ReAct agents, structured outputs |
-| `chromadb` | Local vector database |
-| `sentence-transformers` | Text → embedding (local, no API cost) |
+| `dspy` | LLM orchestration, structured outputs |
+| `sqlite3` | The store itself — stdlib, no server, one `memory.db` file |
+| `fastembed` | Text → embedding (local ONNX, no API cost, no torch) |
 | `rank-bm25` | BM25 keyword ranking for hybrid retrieval |
 | `networkx` | Personalized PageRank over the memory link graph |
 | `pydantic` | Data validation for memory models |
