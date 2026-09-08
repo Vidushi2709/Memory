@@ -72,7 +72,13 @@ class MemoryExtractor(dspy.Signature):
     Create memory entries that you should remember while speaking to the user later.
     Each memory is one atomic unit of information that can be stored and retrieved later.
     Extract EVERY distinct fact the user shares — a single message may yield several
-    memories (e.g. name, location, and job are three separate entries).
+    memories (e.g. name, location, and job are three separate entries). Be
+    exhaustive, not selective. Do not decide a detail is too minor to keep: where
+    the user stores something, which brand they own, a price, a room, a companion's
+    name. Those incidental details are exactly what gets asked about later, and a
+    detail you drop here is unrecoverable. A six-exchange conversation normally
+    yields eight to fifteen memories; if you are producing three, you are
+    summarising the conversation instead of extracting it.
 
     Rate each memory's importance from 1 (mundane detail) to 10 (core fact about the
     user's identity or life). Resolve relative dates ("last week", "next month")
@@ -90,6 +96,22 @@ class MemoryExtractor(dspy.Signature):
       ongoing    — a continuing state or routine ("I see Dr. Lee every month")
     Say it in the information text too — write "User is considering X", not "User X".
     The date is when the event happens, which for planned events is in the future.
+
+    That wording rule applies ONLY to genuine intentions. A plain statement about
+    the user's life is happened or ongoing and must be written flat: "User works
+    at Indigo", "User keeps their old sneakers under the bed" — never softened
+    into a consideration.
+
+    A request for help is not a memory; the facts stated while asking for it are.
+    "I've been keeping my old sneakers under the bed and they're starting to
+    smell, any tips?" yields "User keeps their old sneakers under the bed"
+    (ongoing) — NOT "User is asking for tips on cleaning sneakers". Never write a
+    memory whose content is merely that a topic came up: "User is asking about
+    X", "User is looking for X", "User wants suggestions on X". Those record the
+    conversation instead of the user, and answer no question later. The only
+    exception is when wanting X is itself the durable fact ("User is looking for
+    a new job"). When a message both states something and asks something, the
+    statement is the memory and the question is not.
 
     For each memory also produce: keywords — the 2-5 salient tokens someone would
     search by (names, places, specific things); and context — at most 10 words on
@@ -157,8 +179,11 @@ class MemoryGapCheck(dspy.Signature):
     became true (future for planned events). Set status to: happened (took
     place), planned (committed but not done), considered (only being weighed),
     or ongoing (a continuing state or routine) — and say it in the information
-    text ("User is considering X"). keywords: the 2-5 salient search tokens;
-    context: at most 10 words on what the fact reveals.
+    text ("User is considering X"), but only for genuine intentions: a plain
+    statement of fact is written flat, and a request for help is never itself a
+    memory ("User keeps their sneakers under the bed", not "User is asking about
+    sneaker storage"). keywords: the 2-5 salient search tokens; context: at most
+    10 words on what the fact reveals.
 
     Set about_user to False ONLY for impersonal content: general knowledge,
     trivia, rulings, and advice, recommendations, or explanations the assistant

@@ -8,5 +8,4 @@ python-dotenv==1.2.2
 rich==14.2.0
 pytest==9.0.2
 
-# Only needed to run migrate_chroma_to_sqlite.py once. Uninstall after.
-chromadb==1.1.1
+requests==2.32.5

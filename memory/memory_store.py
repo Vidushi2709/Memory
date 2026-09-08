@@ -48,6 +48,8 @@ LINK_EXPANSION_CAP = 3     # linked memories pulled in alongside search hits
 PPR_SEEDS = 8              # top fused hits used to seed Personalized PageRank
 PPR_MIN_SHARE = 0.01       # share of the top PageRank score a node must reach to count
 USE_PPR = True             # PageRank ranking in the fusion (eval --no-ppr disables)
+USE_VECTOR = True          # cosine ranking in the fusion (eval --retrieval bm25 disables)
+USE_BM25 = True            # keyword ranking in the fusion (eval --retrieval vector disables)
 IMPORTANCE_WEIGHT = 0.15   # importance and retention only break ties — relevance leads
 RETENTION_WEIGHT = 0.10
 STALE_PENALTY = 0.30       # a superseded memory must lose to a current one of equal relevance
@@ -469,17 +471,18 @@ async def search_memories(
 
         # Vector ranking: cosine similarity, brute force over the eligible rows
         vec_rank = []
-        try:
-            q = np.asarray(search_vector, dtype=np.float32)
-            sims = corpus["matrix"] @ (q / (np.linalg.norm(q) + 1e-9))
-            order = np.argsort(-sims)[:fetch_k]
-            vec_rank = [ids[i] for i in order if sims[i] >= RELEVANCE_FLOOR]
-        except Exception as e:
-            log.warning("vector search failed, falling back to keyword ranking: %s", e)
+        if USE_VECTOR:
+            try:
+                q = np.asarray(search_vector, dtype=np.float32)
+                sims = corpus["matrix"] @ (q / (np.linalg.norm(q) + 1e-9))
+                order = np.argsort(-sims)[:fetch_k]
+                vec_rank = [ids[i] for i in order if sims[i] >= RELEVANCE_FLOOR]
+            except Exception as e:
+                log.warning("vector search failed, falling back to keyword ranking: %s", e)
 
         # BM25 keyword ranking over enriched note text (content + keywords + context)
         bm25_rank = []
-        if query_text and corpus["bm25"] is not None:
+        if query_text and USE_BM25 and corpus["bm25"] is not None:
             scores = corpus["bm25"].get_scores(_tokenize(query_text))
             ranked = sorted(zip(ids, scores), key=lambda x: x[1], reverse=True)
             bm25_rank = [i for i, s in ranked if s > 0][:fetch_k]

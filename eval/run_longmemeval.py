@@ -38,13 +38,29 @@ ORACLE_PATH = os.path.join(DATA_DIR, "longmemeval_oracle.json")
 HAYSTACK_PATH = os.path.join(DATA_DIR, "longmemeval_s_cleaned.json")
 
 SLEEP_EVERY = 1  # run the sleep pass after every Nth ingested session
+# Raw transcripts are archived unconditionally, so an admission threshold that
+# shrinks the fact store still leaves the whole conversation reachable and the
+# sweep measures nothing. --no-transcripts cuts that second path so the fact
+# store is the only thing retrieval can reach.
+NO_TRANSCRIPTS = False
+# --no-facts is the other half of the same control: skip extraction entirely and
+# retrieve only raw archived turns. That is the plain-RAG baseline the memory
+# system has to beat to justify its write pipeline.
+NO_FACTS = False
+TOP_K = 5
+RETRIEVAL = "full"
 
 from dotenv import dotenv_values
 
 os.environ.setdefault("OPEN_ROUTER_KEY", dotenv_values(os.path.join(REPO, ".env")).get("OPEN_ROUTER_KEY") or "")
 
 # Isolate chroma_db/ and transcripts/ before the memory modules import
-_workdir = tempfile.mkdtemp(prefix="lme_eval_")
+# LME_STORE_DIR reuses one populated store across runs. A retrieval sweep only
+# varies how the store is queried, so re-ingesting per arm pays the whole
+# extraction bill again for an identical store; with this set, the first arm
+# ingests and the rest skip straight to querying.
+_workdir = os.getenv("LME_STORE_DIR") or tempfile.mkdtemp(prefix="lme_eval_")
+os.makedirs(_workdir, exist_ok=True)
 os.environ["MEMORY_DIR"] = _workdir
 os.environ["MEMORY_PERSONAL_MODE"] = "0"   # benchmark behaviour: grounding guard on, reflection at 40
 sys.path.insert(0, REPO)
@@ -54,7 +70,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-import chatbot
+from memory import answer
 from memory.aggregate import maybe_aggregate
 from memory.consolidate import sleep_pass
 from memory.embedding_generation import generate_embeddings
@@ -67,6 +83,7 @@ from memory.memory_store import (
 from memory.grounding import unverified_terms
 from memory.transcripts import archive_exchange, load_transcripts, search_turns, stringify_turn
 from memory.update_memory import update_memories
+from memory import llm, memory_store
 
 console = Console()
 
@@ -78,8 +95,14 @@ class LMEJudgeSignature(dspy.Signature):
 
     If is_abstention is True, the information was never in the history:
     correct means the assistant indicated it doesn't have that information.
-    Otherwise: paraphrase is fine, extra correct detail is fine; a wrong or
-    contradicting value is incorrect.
+
+    Otherwise the answer must actually CONTAIN the expected information.
+    Paraphrase is fine and extra correct detail is fine, but all of these are
+    incorrect: a wrong or contradicting value; an answer that omits the expected
+    value; and an answer saying the assistant does not know, has no record, or
+    lacks the information. Admitting ignorance is only correct when
+    is_abstention is True. Ask yourself whether a reader of this answer alone
+    would learn the expected fact. If not, it is incorrect.
     """
 
     question: str = dspy.InputField()
@@ -104,7 +127,26 @@ class DerivableSignature(dspy.Signature):
     derivable: bool = dspy.OutputField()
 
 
+class StaleAnswerSignature(dspy.Signature):
+    """
+    Decide whether the assistant answered from an outdated fact.
+
+    The superseded records listed were retrieved alongside current ones and are
+    known to have been replaced by newer information. used_stale is True only if
+    the assistant's answer asserts a value matching one of those superseded
+    records instead of the expected current answer. An answer that is merely
+    wrong for some other reason, or that says it does not know, is NOT stale.
+    """
+
+    question: str = dspy.InputField()
+    expected: str = dspy.InputField()
+    answer: str = dspy.InputField()
+    superseded_records: list[str] = dspy.InputField()
+    used_stale: bool = dspy.OutputField()
+
+
 _judge = dspy.Predict(LMEJudgeSignature)
+_stale_judge = dspy.Predict(StaleAnswerSignature)
 _derivable = dspy.Predict(DerivableSignature)
 
 
@@ -133,7 +175,7 @@ async def audit_derivable(question: str, expected: str, records: list[str]) -> b
 
     for chunk in chunks:
         try:
-            with dspy.context(lm=chatbot._lm):
+            with dspy.context(lm=answer._lm):
                 out = _derivable(question=question, expected=expected, records=chunk)
             if bool(out.derivable):
                 return True
@@ -149,7 +191,9 @@ def lme_date(raw: str) -> str:
 
 async def run_question(idx: int, item: dict) -> dict:
     user_id = 5000 + idx
-    sessions = list(zip(item["haystack_sessions"], item["haystack_dates"]))
+    # already ingested by an earlier arm sharing this store
+    already = bool(await fetch_all_user_records(user_id)) if os.getenv("LME_STORE_DIR") else False
+    sessions = [] if already else list(zip(item["haystack_sessions"], item["haystack_dates"]))
     # oldest first: the dataset lists sessions out of chronological order for 42%
     # of haystack questions, and a real deployment sees conversations in time
     # order. Ingesting as-listed made newer facts look like the ones to supersede.
@@ -168,10 +212,12 @@ async def run_question(idx: int, item: dict) -> dict:
             elif t["role"] == "assistant" and pending_user is not None:
                 archive_exchange(user_id, session_id, pending_user, t["content"], ts=lme_date(sdate))
                 pending_user = None
-        try:
-            await update_memories(user_id, messages, session_id=session_id, current_date=lme_date(sdate))
-        except Exception as e:
-            console.print(f"  [dim red]ingest error session {j}: {e}[/dim red]")
+        if not NO_FACTS:
+            try:
+                await update_memories(user_id, messages, session_id=session_id,
+                                      current_date=lme_date(sdate))
+            except Exception as e:
+                console.print(f"  [dim red]ingest error session {j}: {e}[/dim red]")
         return session_id
 
     # ingest in batches: extraction runs concurrently (it is append-only, so order
@@ -183,38 +229,44 @@ async def run_question(idx: int, item: dict) -> dict:
         )
         if len(sessions) > 10:
             console.print(f"  [dim]  …{min(start + len(batch), len(sessions))}/{len(sessions)} sessions[/dim]")
-        try:
-            # the profile rewrite is the most expensive stage and intermediate
-            # versions are discarded — build it once, after the last batch
-            is_last = start + len(batch) >= len(sessions)
-            await sleep_pass(user_id, list(session_ids), refresh_core=is_last)
-        except Exception as e:
-            console.print(f"  [dim red]sleep pass error: {e}[/dim red]")
+        if not NO_FACTS:
+            try:
+                # the profile rewrite is the most expensive stage and intermediate
+                # versions are discarded — build it once, after the last batch
+                is_last = start + len(batch) >= len(sessions)
+                await sleep_pass(user_id, list(session_ids), refresh_core=is_last)
+            except Exception as e:
+                console.print(f"  [dim red]sleep pass error: {e}[/dim red]")
 
     question = item["question"]
     expected = str(item["answer"])
     is_abs = item["question_id"].endswith("_abs")
 
-    # retrieval, exactly as the chatbot does it (memories + raw transcript turns)
+    # retrieval, exactly as the chatbot does it (memories + raw transcript
+    # turns), unless --no-transcripts isolates the fact store
     vec = (await generate_embeddings([question]))[0]
-    retrieved = await search_memories(
-        search_vector=vec, user_id=user_id, query_text=question, include_old=True
+    retrieved = [] if NO_FACTS else await search_memories(
+        search_vector=vec, user_id=user_id, query_text=question, include_old=True,
+        top_k=TOP_K,
     )
     retrieved_strings = [stringify_retrieved_point(m) for m in retrieved]
-    past_turns = [stringify_turn(t) for t in search_turns(user_id, question)]
-    core = await get_core_memory(user_id)
+    past_turns = ([] if NO_TRANSCRIPTS
+                  else [stringify_turn(t) for t in search_turns(user_id, question)])
+    core = "" if NO_FACTS else await get_core_memory(user_id)
 
     # stage audits (skip for abstention questions — the gold answer is absence)
     store_has, retrieval_has, store_size = None, None, None
     if not is_abs:
-        all_recs = await fetch_all_user_records(user_id)
+        all_recs = [] if NO_FACTS else await fetch_all_user_records(user_id)
         store_strings = ([f"CORE PROFILE: {core}"] if core else []) + [
             ("[OLD] " if not r.is_current else "")
             + r.memory_text
             + (f" (context: {r.context})" if r.context else "")
             + f" [date: {r.date[:10]}]"
             for r in all_recs
-        ] + [stringify_turn(l) for l in load_transcripts(user_id)]
+        ]
+        if not NO_TRANSCRIPTS:
+            store_strings += [stringify_turn(l) for l in load_transcripts(user_id)]
         store_size = len(all_recs)
         store_has = await audit_derivable(question, expected, store_strings)
         retrieval_has = await audit_derivable(
@@ -227,8 +279,8 @@ async def run_question(idx: int, item: dict) -> dict:
         {"role": "assistant", "content": "Noted."},
     ]
     aggregate = await maybe_aggregate(user_id, question, current_date=lme_date(item["question_date"]))
-    with dspy.context(lm=chatbot._lm):
-        out = chatbot._responder(
+    with dspy.context(lm=answer._lm):
+        out = answer._responder(
             core_memory=core, transcript=transcript,
             retrieved_memories=retrieved_strings, past_conversations=past_turns,
             unverified_terms=unverified_terms(question, [core] + retrieved_strings + past_turns),
@@ -238,7 +290,7 @@ async def run_question(idx: int, item: dict) -> dict:
     answer = out.response
 
     try:
-        with dspy.context(lm=chatbot._lm):
+        with dspy.context(lm=answer._lm):
             verdict = _judge(question=question, expected=expected,
                              answer=answer, is_abstention=is_abs)
         correct = bool(verdict.correct)
@@ -256,6 +308,20 @@ async def run_question(idx: int, item: dict) -> dict:
     else:
         stage = "reasoning loss"
 
+    # 5. stale-fact rate: the survey says systems without lifecycle management
+    # answer from superseded facts, and publishes no number for it. This is it.
+    stale_seen = [stringify_retrieved_point(m) for m in retrieved if not m.is_current]
+    used_stale = False
+    if stale_seen and not is_abs and not correct:
+        try:
+            with dspy.context(lm=answer._lm):
+                used_stale = bool(_stale_judge(
+                    question=question, expected=expected, answer=answer,
+                    superseded_records=stale_seen,
+                ).used_stale)
+        except Exception:
+            used_stale = False
+
     mark = "[green]PASS[/green]" if correct else "[red]FAIL[/red]"
     console.print(f"  {mark} [{item['question_type']}{'/abs' if is_abs else ''}] "
                   f"store={store_has} retr={retrieval_has} | {question[:56]} | [dim]{answer[:56]}[/dim]")
@@ -272,6 +338,13 @@ async def run_question(idx: int, item: dict) -> dict:
         "loss_stage": stage,
         "store_size": store_size,
         "min_importance": int(os.getenv("MEMORY_MIN_IMPORTANCE", "0")),
+        "no_transcripts": NO_TRANSCRIPTS,
+        "no_facts": NO_FACTS,
+        "top_k": TOP_K,
+        "retrieval": RETRIEVAL,
+        "superseded_retrieved": len(stale_seen),
+        "answered_from_stale": used_stale,
+        "model": llm.MODEL,
         "aggregate_used": bool(aggregate),
     }
 
@@ -288,13 +361,37 @@ async def main():
     parser.add_argument("--data", default="")
     parser.add_argument("--out", default="longmemeval.json",
                         help="filename (written to eval/results/) or an absolute path")
+    parser.add_argument("--no-facts", action="store_true",
+                        help="skip extraction entirely and retrieve only raw archived "
+                             "turns — the plain-RAG baseline the write pipeline must beat")
+    parser.add_argument("--retrieval", choices=("full", "vector", "bm25", "no-ppr"),
+                        default="full",
+                        help="which ranking channels to fuse (default: all three)")
+    parser.add_argument("--top-k", type=int, default=5,
+                        help="memories retrieved per question (default 5)")
+    parser.add_argument("--no-transcripts", action="store_true",
+                        help="drop the raw-transcript recall path so the extracted "
+                             "fact store is the only thing retrieval can reach — "
+                             "without this, --min-importance shrinks the fact store "
+                             "but the full conversation stays searchable")
     parser.add_argument("--min-importance", type=int, default=0,
                         help="admission control: refuse to store facts the extractor "
                              "scored below this (0 = store everything, the default)")
     args = parser.parse_args()
 
-    global SLEEP_EVERY
+    global SLEEP_EVERY, NO_TRANSCRIPTS, NO_FACTS, TOP_K, RETRIEVAL
     SLEEP_EVERY = max(1, args.sleep_every)
+    NO_TRANSCRIPTS = args.no_transcripts
+    NO_FACTS = args.no_facts
+    TOP_K = args.top_k
+    RETRIEVAL = args.retrieval
+    if NO_FACTS and NO_TRANSCRIPTS:
+        console.print("[red]--no-facts with --no-transcripts leaves nothing to "
+                      "retrieve from.[/red]")
+        return
+    memory_store.USE_VECTOR = args.retrieval in ("full", "vector", "no-ppr")
+    memory_store.USE_BM25 = args.retrieval in ("full", "bm25", "no-ppr")
+    memory_store.USE_PPR = args.retrieval == "full"
 
     # update_memories reads this on every call, so setting it here is in time
     os.environ["MEMORY_MIN_IMPORTANCE"] = str(args.min_importance)
@@ -326,7 +423,11 @@ async def main():
     setting = "haystack (_s)" if args.haystack or "_s" in os.path.basename(data_path) else "oracle"
     console.print(f"[bold]LongMemEval {setting} — {len(sample)} questions[/bold] "
                   f"(sleep pass every {SLEEP_EVERY} session(s), "
-                  f"min importance {args.min_importance}, workdir: {_workdir})\n")
+                  f"min importance {args.min_importance}, "
+                  f"transcript recall {'OFF' if NO_TRANSCRIPTS else 'on'}, "
+                  f"fact store {'OFF' if NO_FACTS else 'on'}, "
+                  f"retrieval {RETRIEVAL} top-{TOP_K}, "
+                  f"workdir: {_workdir})\n")
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out_path = args.out if os.path.isabs(args.out) else os.path.join(RESULTS_DIR, args.out)
@@ -381,6 +482,15 @@ async def main():
         f"[dim]Answer present in store: {sum(in_store)}/{len(in_store)}  |  "
         f"survived retrieval: {sum(in_retr)}/{len(in_retr)}{mean_size}[/dim]"
     )
+
+    saw_stale = [r for r in non_abs if r.get("superseded_retrieved")]
+    stale_answers = [r for r in non_abs if r.get("answered_from_stale")]
+    if saw_stale:
+        console.print(
+            f"[dim]Superseded memory reached the prompt on {len(saw_stale)}/{len(non_abs)} "
+            f"questions; the answer came from it on {len(stale_answers)} "
+            f"({100 * len(stale_answers) / len(saw_stale):.0f}% of those).[/dim]"
+        )
 
     console.print(f"[dim]Raw results written to {out_path}[/dim]")
 
