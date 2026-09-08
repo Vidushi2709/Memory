@@ -17,6 +17,28 @@ def delete_transcripts(user_id: int):
         os.remove(path)
 
 
+# Secrets never enter the log: every source (chat, jots, Claude Code transcripts,
+# git) writes through archive_exchange, so this is the one place to scrub.
+_SECRET_RES = [
+    re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_\-]{16,}"),                 # OpenAI/Stripe-style
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}"),                           # Google API key
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}"),  # GitHub
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),                     # Slack
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                 # AWS access key id
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),  # JWT
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-.=+/]{16,}"),
+    re.compile(r"(?i)\b([A-Z_]*(?:api[_-]?key|secret|token|password|passwd)[A-Z_]*)(\s*[=:]\s*['\"]?)[A-Za-z0-9_\-.=+/]{12,}"),
+]
+
+
+def redact(text: str) -> str:
+    if not text:
+        return text
+    for rx in _SECRET_RES[:-1]:
+        text = rx.sub("[REDACTED]", text)
+    return _SECRET_RES[-1].sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+
+
 def archive_exchange(user_id: int, session_id: str, user_msg: str, assistant_msg: str, ts: str = ""):
     """Append one exchange to the user's raw transcript log (experience bank).
 
@@ -28,8 +50,8 @@ def archive_exchange(user_id: int, session_id: str, user_msg: str, assistant_msg
     line = {
         "session_id": session_id,
         "ts": ts or datetime.now().isoformat(),
-        "user": user_msg,
-        "assistant": assistant_msg,
+        "user": redact(user_msg),
+        "assistant": redact(assistant_msg),
     }
     with open(os.path.join(TRANSCRIPT_DIR, f"user_{user_id}.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -65,7 +87,8 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def search_turns(user_id: int, query_text: str, top_k: int = TURN_SEARCH_TOP_K) -> list[dict]:
+def search_turns(user_id: int, query_text: str, top_k: int = TURN_SEARCH_TOP_K,
+                 session_prefix="") -> list[dict]:
     """BM25 search over raw exchanges — recalls what was actually said,
     including assistant answers that fact extraction never stores.
 
@@ -73,7 +96,7 @@ def search_turns(user_id: int, query_text: str, top_k: int = TURN_SEARCH_TOP_K) 
     a score threshold silently drops everything on short histories. Rank by
     BM25, but gate on real (non-stopword) word overlap instead.
     """
-    lines = load_transcripts(user_id)
+    lines = [l for l in load_transcripts(user_id) if l["session_id"].startswith(session_prefix)]
     if not lines or not query_text:
         return []
     docs = [_tokenize(l["user"] + " " + l["assistant"]) for l in lines]

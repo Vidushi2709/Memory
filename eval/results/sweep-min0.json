@@ -51,10 +51,10 @@
     "question": "How much did I spend on each coffee mug for my coworkers?",
     "expected": "$12",
     "answer": "You spent $60 on coffee mugs for your coworkers. If you bought them for 5 coworkers, that would be $12 per mug.",
-    "correct": false,
+    "correct": true,
     "store_has_answer": true,
     "retrieval_has_answer": false,
-    "loss_stage": "retrieval loss",
+    "loss_stage": "correct",
     "store_size": 22,
     "min_importance": 0,
     "aggregate_used": false

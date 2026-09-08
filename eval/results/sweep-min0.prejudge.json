@@ -10,8 +10,8 @@
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "correct",
-    "store_size": 2,
-    "min_importance": 6,
+    "store_size": 5,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -20,13 +20,13 @@
     "is_abstention": false,
     "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
     "expected": "When you just started your new role as Senior Software Engineer, you led 4 engineers. Now, you lead 5 engineers",
-    "answer": "When you first started as a Senior Software Engineer, you led a team of 4 engineers. Currently, you lead a team of five engineers.",
+    "answer": "When you first started your new role as Senior Software Engineer, you led a team of 4 engineers. Currently, you lead a team of five engineers.",
     "correct": true,
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "correct",
-    "store_size": 14,
-    "min_importance": 6,
+    "store_size": 16,
+    "min_importance": 0,
     "aggregate_used": true
   },
   {
@@ -35,13 +35,13 @@
     "is_abstention": false,
     "question": "How many doctor's appointments did I go to in March?",
     "expected": "2",
-    "answer": "You had 3 doctor's appointments in March: a diagnosis for bronchitis on March 3rd, a follow-up with your orthopedic surgeon on March 20th, and you started physical therapy sessions twice a week starting March 25th.",
+    "answer": "You had 4 doctor's appointments in March:\n\n*   March 3rd: Appointment with Dr. Smith for bronchitis.\n*   March 20th: Follow-up with orthopedic surgeon Dr. Thompson regarding your knee.\n*   March 27th: Appointment with your primary care physician for your lingering cough.",
     "correct": false,
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "reasoning loss",
-    "store_size": 15,
-    "min_importance": 6,
+    "store_size": 37,
+    "min_importance": 0,
     "aggregate_used": true
   },
   {
@@ -50,13 +50,13 @@
     "is_abstention": false,
     "question": "How much did I spend on each coffee mug for my coworkers?",
     "expected": "$12",
-    "answer": "You spent $60 on coffee mugs for your coworkers. If you bought one for each of the 5 coworkers you mentioned, that would be $12 per mug.",
-    "correct": true,
-    "store_has_answer": false,
-    "retrieval_has_answer": true,
-    "loss_stage": "correct",
-    "store_size": 6,
-    "min_importance": 6,
+    "answer": "You spent $60 on coffee mugs for your coworkers. If you bought them for 5 coworkers, that would be $12 per mug.",
+    "correct": false,
+    "store_has_answer": true,
+    "retrieval_has_answer": false,
+    "loss_stage": "retrieval loss",
+    "store_size": 22,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -71,7 +71,7 @@
     "retrieval_has_answer": true,
     "loss_stage": "correct",
     "store_size": 0,
-    "min_importance": 6,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -80,13 +80,13 @@
     "is_abstention": false,
     "question": "I'm looking back at our previous chess game and I was wondering, what was the move you made after 27. Kg2 Bd5+?",
     "expected": "28. Kg3",
-    "answer": "After 27. Kg2 Bd5+, I played 29. Rd3 Rh4.",
+    "answer": "After 27. Kg2 Bd5+, I made the move Rd3.",
     "correct": false,
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "reasoning loss",
-    "store_size": 0,
-    "min_importance": 6,
+    "store_size": 3,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -95,13 +95,13 @@
     "is_abstention": false,
     "question": "Can you suggest some accessories that would complement my current photography setup?",
     "expected": "The user would prefer suggestions of Sony-compatible accessories or high-quality photography gear that can enhance their photography experience. They may not prefer suggestions of other brands' equipment or low-quality gear.",
-    "answer": "I can help with that! To give you the best recommendations, could you tell me a bit more about your current photography setup? For example, what camera and lenses do you primarily use, and what kind of photography do you enjoy most?",
+    "answer": "I can certainly help with that! To give you the best accessory recommendations, could you tell me a bit more about your current photography setup? For example, what Sony camera model do you have, and what kind of photography do you primarily do (e.g., portraits, landscapes, wildlife, street)? Also, are you looking for accessories to improve your workflow, enhance image quality, or perhaps something for travel?",
     "correct": false,
-    "store_has_answer": false,
+    "store_has_answer": true,
     "retrieval_has_answer": false,
-    "loss_stage": "write-path loss",
-    "store_size": 1,
-    "min_importance": 6,
+    "loss_stage": "retrieval loss",
+    "store_size": 3,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -110,13 +110,13 @@
     "is_abstention": false,
     "question": "What should I serve for dinner this weekend with my homegrown ingredients?",
     "expected": "The user would prefer dinner suggestions that incorporate their homegrown cherry tomatoes and herbs like basil and mint, highlighting recipes that showcase their garden produce. They might not prefer suggestions that do not utilize these specific ingredients or do not emphasize the use of homegrown elements.",
-    "answer": "I don't have any specific dinner recipes in my memory that use homegrown ingredients. However, I do have some recipe ideas that combine basil and mint, which you mentioned growing in a past conversation:\n\n1.  **Herby Lemonade**: Infuse lemonade with fresh basil and mint leaves for a refreshing summer drink.\n2.  **Middle Eastern-Style Salad**: Combine chopped basil and mint with bulgur, cherry tomatoes, cucumbers, feta cheese, and a lemon-tahini dressing.\n3.  **Basil and Mint Chimichurri**: Blend basil, mint, parsley, garlic, red pepper flakes, red wine vinegar, and olive oil to create a flavorful Argentinean herb sauce.\n\nWould any of these sound good, or would you like me to search for other types of recipes?",
-    "correct": false,
+    "answer": "Since you have cherry tomatoes, basil, and mint growing, how about a Caprese salad with a side of grilled chicken or fish, and a refreshing mint and basil lemonade to drink? That would highlight your homegrown ingredients beautifully!",
+    "correct": true,
     "store_has_answer": true,
     "retrieval_has_answer": true,
-    "loss_stage": "reasoning loss",
-    "store_size": 1,
-    "min_importance": 6,
+    "loss_stage": "correct",
+    "store_size": 4,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -125,13 +125,13 @@
     "is_abstention": false,
     "question": "How long did I wait for the decision on my asylum application?",
     "expected": "over a year",
-    "answer": "You waited over a year for the decision on your asylum application.",
+    "answer": "You waited over a year for the decision on your asylum application. That must have been a very difficult time.",
     "correct": true,
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "correct",
-    "store_size": 15,
-    "min_importance": 6,
+    "store_size": 24,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -145,8 +145,8 @@
     "store_has_answer": true,
     "retrieval_has_answer": true,
     "loss_stage": "correct",
-    "store_size": 5,
-    "min_importance": 6,
+    "store_size": 9,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -155,13 +155,13 @@
     "is_abstention": false,
     "question": "How many days had passed between the Sunday mass at St. Mary's Church and the Ash Wednesday service at the cathedral?",
     "expected": "30 days. 31 days (including the last day) is also acceptable.",
-    "answer": "I don't have the specific dates for those events. I can tell you that you attended the Ash Wednesday service at the cathedral on February 1st.",
-    "correct": false,
-    "store_has_answer": false,
+    "answer": "There were 30 days between the Sunday mass at St. Mary's Church on January 2nd and the Ash Wednesday service at the cathedral on February 1st.",
+    "correct": true,
+    "store_has_answer": true,
     "retrieval_has_answer": true,
-    "loss_stage": "write-path loss",
-    "store_size": 11,
-    "min_importance": 6,
+    "loss_stage": "correct",
+    "store_size": 16,
+    "min_importance": 0,
     "aggregate_used": false
   },
   {
@@ -176,7 +176,7 @@
     "retrieval_has_answer": true,
     "loss_stage": "reasoning loss",
     "store_size": 25,
-    "min_importance": 6,
+    "min_importance": 0,
     "aggregate_used": true
   }
 ]

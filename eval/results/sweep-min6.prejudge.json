@@ -96,10 +96,10 @@
     "question": "Can you suggest some accessories that would complement my current photography setup?",
     "expected": "The user would prefer suggestions of Sony-compatible accessories or high-quality photography gear that can enhance their photography experience. They may not prefer suggestions of other brands' equipment or low-quality gear.",
     "answer": "I can help with that! To give you the best recommendations, could you tell me a bit more about your current photography setup? For example, what camera and lenses do you primarily use, and what kind of photography do you enjoy most?",
-    "correct": false,
+    "correct": true,
     "store_has_answer": false,
     "retrieval_has_answer": false,
-    "loss_stage": "write-path loss",
+    "loss_stage": "correct",
     "store_size": 1,
     "min_importance": 6,
     "aggregate_used": false

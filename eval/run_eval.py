@@ -39,7 +39,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-import chatbot
+from memory import answer
 from scenarios import SCENARIOS
 from memory.aggregate import maybe_aggregate
 from memory.consolidate import sleep_pass
@@ -81,11 +81,11 @@ async def ask(user_id: int, question: str) -> str:
     past_turns = [stringify_turn(t) for t in search_turns(user_id, question)]
     core = await get_core_memory(user_id)
     aggregate = await maybe_aggregate(user_id, question)
-    if chatbot.COMPOSE_ON_READ and strings:
-        with dspy.context(lm=chatbot._lm):
-            strings = [chatbot._composer(question=question, memories=strings).digest]
-    with dspy.context(lm=chatbot._lm):
-        out = chatbot._responder(
+    if answer.COMPOSE_ON_READ and strings:
+        with dspy.context(lm=answer._lm):
+            strings = [answer._composer(question=question, memories=strings).digest]
+    with dspy.context(lm=answer._lm):
+        out = answer._responder(
             core_memory=core, transcript=[], retrieved_memories=strings,
             past_conversations=past_turns,
             unverified_terms=unverified_terms(question, [core] + strings + past_turns),
@@ -112,7 +112,7 @@ async def run_scenario(idx: int, scenario: dict) -> list[dict]:
     for item in scenario["questions"]:
         answer = await ask(user_id, item["q"])
         try:
-            with dspy.context(lm=chatbot._lm):
+            with dspy.context(lm=answer._lm):
                 verdict = _judge(question=item["q"], expected=item["expect"], answer=answer)
             correct = bool(verdict.correct)
         except Exception:
@@ -138,7 +138,7 @@ async def main():
     parser.add_argument("--out", default="", help="filename (written to eval/results/) or an absolute path")
     args = parser.parse_args()
 
-    chatbot.COMPOSE_ON_READ = args.compose
+    answer.COMPOSE_ON_READ = args.compose
     memory_store.USE_PPR = not args.no_ppr
 
     scenarios = [s for s in SCENARIOS if args.filter in s["name"]]
