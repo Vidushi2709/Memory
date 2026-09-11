@@ -100,6 +100,37 @@ def test_unreconciled_sessions_until_marked():
     run(go())
 
 
+def test_failed_reconcile_group_is_left_for_the_next_pass(monkeypatch):
+    """A catch-up once sent ~530 facts in one reconcile call; the reply was cut
+    off, the call failed, and every fact was stamped reconciled anyway."""
+    import memory.consolidate as c
+    calls = []
+
+    async def fake_call(predictor, new_memories, existing_memories):
+        calls.append(len(new_memories))
+        if len(calls) == 1:
+            raise ValueError("reply cut off at max_tokens")
+        return type("Out", (), {"supersede_pairs": "", "link_pairs": ""})()
+
+    async def nothing(*a, **kw):
+        return 0
+
+    monkeypatch.setattr(c, "_call", fake_call)
+    for name in ("dedup_memories", "evolve_memories", "maybe_reflect"):
+        monkeypatch.setattr(c, name, nothing)
+
+    async def go():
+        await mark_reconciled(await add_memory([mem(83, "old fact", "s0")]))
+        await add_memory([mem(83, f"new fact {i}", "s1") for i in range(35)])
+        summary = await c.sleep_pass(83, ["s1"], refresh_core=False)
+        assert calls == [30, 5]                     # grouped, not one call over everything
+        assert "failed for 30 fact(s)" in summary
+        recs = await fetch_user_records_raw(83, include_embeddings=False)
+        assert sum(1 for m in recs["metadatas"] if m.get("reconciled")) == 1 + 5
+        assert await unreconciled_sessions(83) == ["s1"]   # the failed 30 get retried
+    run(go())
+
+
 def test_core_profile_round_trips_and_stays_out_of_search():
     async def go():
         await add_memory([mem(79, "User bikes to work")])

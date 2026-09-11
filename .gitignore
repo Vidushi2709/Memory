@@ -7,4 +7,5 @@ memory.db-shm
 memory.db-wal
 models
 transcripts
+mem.log
 .pytest_cache

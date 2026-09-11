@@ -182,6 +182,7 @@ def _natural_key(sid: str) -> list:
 
 
 RECONCILE_EXISTING_CAP = 40  # existing memories one reconcile call can weigh
+RECONCILE_NEW_CAP = 30       # new memories per call: ~530 in one call overran the 4096-token reply and failed
 
 
 def _most_relevant(new, existing, cap):
@@ -201,10 +202,14 @@ def _most_relevant(new, existing, cap):
     return [existing[i] for i in keep]
 
 
-async def reconcile_session(user_id: int, session_ids) -> str:
+async def reconcile_session(user_id: int, session_ids) -> tuple[str, set]:
     """
-    One large-context call reconciles the given sessions' new memories against
-    the existing store: supersedes changed facts, links related ones.
+    Reconciles the given sessions' new memories against the existing store:
+    supersedes changed facts, links related ones. New memories go RECONCILE_NEW_CAP
+    per call, each group weighed against the existing memories closest to it.
+
+    Returns the summary and the ids of new memories whose call failed, so the
+    caller can leave them unstamped and the next pass retries them.
     """
     sids = _as_set(session_ids)
     recs = await fetch_user_records_raw(user_id)
@@ -219,8 +224,26 @@ async def reconcile_session(user_id: int, session_ids) -> str:
         else:
             existing.append((id_, meta, emb))
     if not new or not existing:
-        return "nothing to reconcile"
+        return "nothing to reconcile", set()
 
+    superseded, refused, linked, failed = 0, 0, 0, set()
+    for start in range(0, len(new), RECONCILE_NEW_CAP):
+        s, r, l = await _reconcile_group(new[start:start + RECONCILE_NEW_CAP], existing)
+        if s is None:
+            failed |= {id_ for id_, _, _ in new[start:start + RECONCILE_NEW_CAP]}
+            continue
+        superseded, refused, linked = superseded + s, refused + r, linked + l
+    summary = f"{superseded} superseded, {linked + refused} linked"
+    if refused:
+        summary += f" ({refused} supersede refused: stale or a re-told event)"
+    if failed:
+        summary += f", reconcile call failed for {len(failed)} fact(s), retried next pass"
+    return summary, failed
+
+
+async def _reconcile_group(new, existing) -> tuple:
+    """One reconcile call for a group of new memories. Returns (superseded,
+    refused, linked), or (None, None, None) when the call failed."""
     existing = _most_relevant(new, existing, RECONCILE_EXISTING_CAP)
 
     fmt = lambda tag, i, meta: f"{tag}{i}: {meta['memory_text']} (date: {meta.get('date', '')[:10]})"
@@ -232,7 +255,7 @@ async def reconcile_session(user_id: int, session_ids) -> str:
         out = await _call(_reconciler,
                           new_memories=new_texts, existing_memories=existing_texts)
     except Exception:
-        return "reconcile call failed"
+        return None, None, None
 
     superseded, refused = 0, 0
     for ni, ei in _parse_pairs(out.supersede_pairs, len(new), len(existing)):
@@ -262,9 +285,7 @@ async def reconcile_session(user_id: int, session_ids) -> str:
     for ni, ei in _parse_pairs(out.link_pairs, len(new), len(existing)):
         await add_links(new[ni][0], [existing[ei][0]])
         linked += 1
-    summary = f"{superseded} superseded, {linked + refused} linked"
-    return summary + (f" ({refused} supersede refused: stale or a re-told event)"
-                      if refused else "")
+    return superseded, refused, linked
 
 
 CORE_FACT_CAP = 40  # facts the profile is rebuilt from, spread across categories
@@ -327,7 +348,8 @@ async def sleep_pass(user_id: int, session_ids, refresh_core: bool = True) -> st
     latest = max(sids, key=_natural_key)
 
     # reconcile first: it supersedes and links, which the later stages read
-    parts = [await reconcile_session(user_id, sids)]
+    reconciled, failed = await reconcile_session(user_id, sids)
+    parts = [reconciled]
 
     # dedup->evolve must stay ordered (evolve reads links and skips merged-away
     # memories); reflection only appends insights, so it can run alongside
@@ -350,11 +372,12 @@ async def sleep_pass(user_id: int, session_ids, refresh_core: bool = True) -> st
         await refresh_core_memory(user_id)
 
     # stamp the sessions this pass covered, so a pass that never ran (process
-    # killed mid-session) is visible to unreconciled_sessions and repaired later
+    # killed mid-session) or a reconcile call that failed is visible to
+    # unreconciled_sessions and repaired later
     recs = await fetch_user_records_raw(user_id, include_embeddings=False)
     await mark_reconciled([
         id_ for id_, meta in zip(recs["ids"], recs["metadatas"])
-        if meta.get("session_id") in sids and kind_of(meta) == "fact"
+        if meta.get("session_id") in sids and kind_of(meta) == "fact" and id_ not in failed
     ])
     return ", ".join(p for p in parts if p)
 
