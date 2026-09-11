@@ -33,7 +33,10 @@ load_dotenv(os.path.join(REPO, ".env"))  # llm.py's bare load_dotenv() only look
 
 USER = int(os.getenv("MEM_USER", "1"))
 run = asyncio.run
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows console is cp1252
+if sys.stdout is None:  # pythonw (the scheduled tasks): no console, so output and tracebacks go to a log
+    sys.stdout = sys.stderr = open(os.path.join(REPO, "mem.log"), "a", encoding="utf-8", buffering=1)
+else:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows console is cp1252
 
 # colours: any rich style name or hex, edit freely
 DATE_STYLE, TEXT_STYLE, TAG_STYLE = "hot_pink", "medium_purple", "grey50"
