@@ -159,7 +159,10 @@ def ask(q: str):
 Answer the question from the material below only. Quote the date something was
 said when it matters. If the material does not contain the answer, say you have
 no record of it; never guess. Facts marked OLD/SUPERSEDED were true once and
-are no longer current. Be brief.
+are no longer current. Two facts can both be current and still disagree about
+the same thing (which model, which tool, where the user lives): the later
+[Saved:] date is the present state, the earlier one is history — answer from the
+later one and mention the earlier only as what it used to be. Be brief.
 
 PROFILE:
 {run(get_core_memory(USER)) or "(none)"}
@@ -235,15 +238,20 @@ def _ingest_git() -> int:
     import glob
     import subprocess
     from memory.transcripts import archive_exchange, load_transcripts
+    # pythonw (the scheduled tasks) has no console of its own, so Windows gives
+    # every child process a new one: 14 repos flashed 14 terminals a night
+    hide = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     # keyed on time + subject, not repo: two clones of one repo are one history
     seen = {(l["ts"][:19], l["user"].split("] ", 1)[-1]) for l in load_transcripts(USER) if l["session_id"].startswith("git-")}
-    me = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()
+    me = subprocess.run(["git", "config", "--global", "user.name"],
+                        capture_output=True, text=True, **hide).stdout.strip()
     added = 0
     for g in glob.glob(os.path.join(GIT_ROOT, "*", ".git")) + glob.glob(os.path.join(GIT_ROOT, "*", "*", ".git")):
         repo = os.path.dirname(g)
         sid = f"git-{os.path.basename(repo)}"
         out = subprocess.run(["git", "-C", repo, "log", "--all", f"--author={me}", "--format=%cI%x09%s"],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", **hide).stdout
         for line in out.splitlines():
             ts, _, subject = line.partition("\t")
             if (ts[:19], subject.strip()) in seen:

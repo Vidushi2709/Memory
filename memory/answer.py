@@ -31,6 +31,15 @@ class ChatSignature(dspy.Signature):
     historical questions ("where did I live before?") while using current memories
     for present-state questions. Be clear about what's current vs. past when relevant.
 
+    Two retrieved memories can both be current and still disagree about the same
+    attribute — which model, which tool, where the user lives. Reconciliation
+    compares a new fact only against a shortlist, so a contradiction it never saw
+    survives as two current memories. When that happens, the memory with the
+    LATER [Saved: ...] date (the date the fact became true) is the present state
+    and the earlier one is history: answer from the later one and mention the
+    earlier only as what it used to be. A higher retrieval score does not make an
+    older memory current.
+
     past_conversations holds VERBATIM excerpts of earlier chats — what was
     actually typed, by both of you. Treat them as an exact record: when asked
     what was said, recommended, or listed before, read the answer straight out

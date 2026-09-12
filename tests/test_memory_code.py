@@ -107,7 +107,9 @@ def test_failed_reconcile_group_is_left_for_the_next_pass(monkeypatch):
     calls = []
 
     async def fake_call(predictor, new_memories, existing_memories):
-        calls.append(len(new_memories))
+        # the pass's own facts on the existing side = the self-comparison round
+        against = "self" if any("new fact" in e for e in existing_memories) else "store"
+        calls.append((len(new_memories), against))
         if len(calls) == 1:
             raise ValueError("reply cut off at max_tokens")
         return type("Out", (), {"supersede_pairs": "", "link_pairs": ""})()
@@ -123,11 +125,45 @@ def test_failed_reconcile_group_is_left_for_the_next_pass(monkeypatch):
         await mark_reconciled(await add_memory([mem(83, "old fact", "s0")]))
         await add_memory([mem(83, f"new fact {i}", "s1") for i in range(35)])
         summary = await c.sleep_pass(83, ["s1"], refresh_core=False)
-        assert calls == [30, 5]                     # grouped, not one call over everything
+        # grouped, not one call over everything; each group sees store then self
+        assert calls == [(30, "store"), (30, "self"), (5, "store"), (5, "self")]
         assert "failed for 30 fact(s)" in summary
         recs = await fetch_user_records_raw(83, include_embeddings=False)
         assert sum(1 for m in recs["metadatas"] if m.get("reconciled")) == 1 + 5
         assert await unreconciled_sessions(83) == ["s1"]   # the failed 30 get retried
+    run(go())
+
+
+def test_contradiction_inside_one_pass_supersedes(monkeypatch):
+    """Live failure on 2026-09-12: "extraction uses Qwen3-30B" (Aug 10) and
+    "uses Gemini Flash-Lite" (Sep 2) arrived in one ingest, so both stayed
+    current and `mem ask` answered with the older one. Reconcile compared new
+    facts only against the store, never against each other."""
+    import memory.consolidate as c
+
+    async def fake_call(predictor, new_memories, existing_memories):
+        pairs = [f"N{ni}:E{ei}"
+                 for ni, n in enumerate(new_memories) if "Flash-Lite" in n
+                 for ei, e in enumerate(existing_memories) if "Qwen" in e]
+        return type("Out", (), {"supersede_pairs": ",".join(pairs), "link_pairs": ""})()
+
+    async def nothing(*a, **kw):
+        return 0
+
+    monkeypatch.setattr(c, "_call", fake_call)
+    for name in ("dedup_memories", "evolve_memories", "maybe_reflect"):
+        monkeypatch.setattr(c, name, nothing)
+
+    async def go():
+        await add_memory([
+            mem(84, "Extraction uses Qwen3-30B", "s1", date="2026-08-10"),
+            mem(84, "Extraction uses Gemini Flash-Lite", "s1", date="2026-09-02"),
+        ])
+        await c.sleep_pass(84, ["s1"], refresh_core=False)
+        recs = await fetch_user_records_raw(84, include_embeddings=False)
+        state = {m["memory_text"]: int(m["is_current"]) for m in recs["metadatas"]}
+        assert state == {"Extraction uses Qwen3-30B": 0,
+                         "Extraction uses Gemini Flash-Lite": 1}
     run(go())
 
 
