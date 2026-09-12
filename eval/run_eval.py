@@ -110,23 +110,28 @@ async def run_scenario(idx: int, scenario: dict) -> list[dict]:
 
     results = []
     for item in scenario["questions"]:
-        answer = await ask(user_id, item["q"])
+        # not `answer`: that shadowed the imported memory.answer module, so
+        # `answer._lm` below raised AttributeError, the bare except turned it
+        # into a wrong verdict, and every run scored 0%
+        reply = await ask(user_id, item["q"])
         try:
             with dspy.context(lm=answer._lm):
-                verdict = _judge(question=item["q"], expected=item["expect"], answer=answer)
+                verdict = _judge(question=item["q"], expected=item["expect"], answer=reply)
             correct = bool(verdict.correct)
-        except Exception:
+        except Exception as e:
+            # a judge that cannot run is a broken harness, not a wrong answer
+            print(f"  JUDGE FAILED: {type(e).__name__}: {e}", file=sys.stderr)
             correct = False
         results.append({
             "scenario": scenario["name"],
             "category": item["category"],
             "question": item["q"],
             "expected": item["expect"],
-            "answer": answer,
+            "answer": reply,
             "correct": correct,
         })
         mark = "[green]PASS[/green]" if correct else "[red]FAIL[/red]"
-        console.print(f"  {mark} [{item['category']}] {item['q']} | [dim]{answer[:90]}[/dim]")
+        console.print(f"  {mark} [{item['category']}] {item['q']} | [dim]{reply[:90]}[/dim]")
     return results
 
 

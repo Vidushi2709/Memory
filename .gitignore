@@ -9,3 +9,4 @@ models
 transcripts
 mem.log
 .pytest_cache
+memory.db.bak-*

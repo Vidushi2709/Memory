@@ -287,14 +287,17 @@ async def run_question(idx: int, item: dict) -> dict:
             computed_aggregate=aggregate,
             question=question,
         )
-    answer = out.response
+    # not `answer`: that shadowed the imported memory.answer module, so every
+    # `answer._lm` below raised AttributeError and every verdict scored wrong
+    reply = out.response
 
     try:
         with dspy.context(lm=answer._lm):
             verdict = _judge(question=question, expected=expected,
-                             answer=answer, is_abstention=is_abs)
+                             answer=reply, is_abstention=is_abs)
         correct = bool(verdict.correct)
-    except Exception:
+    except Exception as e:
+        print(f"  JUDGE FAILED: {type(e).__name__}: {e}", file=sys.stderr)
         correct = False
 
     if is_abs:
@@ -316,22 +319,23 @@ async def run_question(idx: int, item: dict) -> dict:
         try:
             with dspy.context(lm=answer._lm):
                 used_stale = bool(_stale_judge(
-                    question=question, expected=expected, answer=answer,
+                    question=question, expected=expected, answer=reply,
                     superseded_records=stale_seen,
                 ).used_stale)
-        except Exception:
+        except Exception as e:
+            print(f"  STALE JUDGE FAILED: {type(e).__name__}: {e}", file=sys.stderr)
             used_stale = False
 
     mark = "[green]PASS[/green]" if correct else "[red]FAIL[/red]"
     console.print(f"  {mark} [{item['question_type']}{'/abs' if is_abs else ''}] "
-                  f"store={store_has} retr={retrieval_has} | {question[:56]} | [dim]{answer[:56]}[/dim]")
+                  f"store={store_has} retr={retrieval_has} | {question[:56]} | [dim]{reply[:56]}[/dim]")
     return {
         "question_id": item["question_id"],
         "question_type": item["question_type"],
         "is_abstention": is_abs,
         "question": question,
         "expected": expected,
-        "answer": answer,
+        "answer": reply,
         "correct": correct,
         "store_has_answer": store_has,
         "retrieval_has_answer": retrieval_has,

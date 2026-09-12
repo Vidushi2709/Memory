@@ -206,7 +206,8 @@ async def reconcile_session(user_id: int, session_ids) -> tuple[str, set]:
     """
     Reconciles the given sessions' new memories against the existing store:
     supersedes changed facts, links related ones. New memories go RECONCILE_NEW_CAP
-    per call, each group weighed against the existing memories closest to it.
+    per call, each group weighed against the existing memories closest to it and
+    then against the pass's own other new facts.
 
     Returns the summary and the ids of new memories whose call failed, so the
     caller can leave them unstamped and the next pass retries them.
@@ -223,16 +224,35 @@ async def reconcile_session(user_id: int, session_ids) -> tuple[str, set]:
             new.append((id_, meta, emb))
         else:
             existing.append((id_, meta, emb))
-    if not new or not existing:
+    if not new or (not existing and len(new) < 2):
         return "nothing to reconcile", set()
 
     superseded, refused, linked, failed = 0, 0, 0, set()
     for start in range(0, len(new), RECONCILE_NEW_CAP):
-        s, r, l = await _reconcile_group(new[start:start + RECONCILE_NEW_CAP], existing)
-        if s is None:
-            failed |= {id_ for id_, _, _ in new[start:start + RECONCILE_NEW_CAP]}
+        group = new[start:start + RECONCILE_NEW_CAP]
+        # Two calls per group: against the store, then against the pass's own
+        # facts. Only the first existed, so a change of mind *inside* one ingest
+        # left both facts current -- a backfill kept "extraction uses Qwen3-30B"
+        # (Aug 10) alongside "uses Gemini Flash-Lite" (Sep 2) and answered with
+        # the older one. A fact never supersedes itself; _reconcile_group skips
+        # a pair naming the same id on both sides.
+        rounds = []
+        if existing:
+            rounds.append(await _reconcile_group(
+                group, _most_relevant(group, existing, RECONCILE_EXISTING_CAP)))
+        others = new[:start] + new[start + RECONCILE_NEW_CAP:]
+        if len(new) > 1:
+            # the group itself plus the nearest facts from other groups: picking
+            # by closeness alone would fill the pool with the group's own facts
+            # and never compare across groups, which is how a whole backfill
+            # reconciles against nothing
+            pool = group + _most_relevant(group, others, RECONCILE_EXISTING_CAP) if others else group
+            rounds.append(await _reconcile_group(group, pool))
+        if any(s is None for s, _, _ in rounds):
+            failed |= {id_ for id_, _, _ in group}
             continue
-        superseded, refused, linked = superseded + s, refused + r, linked + l
+        for s, r, l in rounds:
+            superseded, refused, linked = superseded + s, refused + r, linked + l
     summary = f"{superseded} superseded, {linked + refused} linked"
     if refused:
         summary += f" ({refused} supersede refused: stale or a re-told event)"
@@ -242,10 +262,9 @@ async def reconcile_session(user_id: int, session_ids) -> tuple[str, set]:
 
 
 async def _reconcile_group(new, existing) -> tuple:
-    """One reconcile call for a group of new memories. Returns (superseded,
-    refused, linked), or (None, None, None) when the call failed."""
-    existing = _most_relevant(new, existing, RECONCILE_EXISTING_CAP)
-
+    """One reconcile call for a group of new memories against a pool the caller
+    has already chosen. Returns (superseded, refused, linked), or
+    (None, None, None) when the call failed."""
     fmt = lambda tag, i, meta: f"{tag}{i}: {meta['memory_text']} (date: {meta.get('date', '')[:10]})"
     # build the prompt outside the try: only the call itself may fail silently,
     # or a coding error here disables reconciliation with no sign it happened
@@ -259,6 +278,8 @@ async def _reconcile_group(new, existing) -> tuple:
 
     superseded, refused = 0, 0
     for ni, ei in _parse_pairs(out.supersede_pairs, len(new), len(existing)):
+        if new[ni][0] == existing[ei][0]:   # the pass's own facts are on both sides
+            continue
         ex_meta, new_meta = existing[ei][1], new[ni][1]
         # An older statement must never supersede a newer one. Sessions do not
         # always arrive in chronological order — a user can mention a past fact
@@ -283,6 +304,8 @@ async def _reconcile_group(new, existing) -> tuple:
         superseded += 1
     linked = 0
     for ni, ei in _parse_pairs(out.link_pairs, len(new), len(existing)):
+        if new[ni][0] == existing[ei][0]:
+            continue
         await add_links(new[ni][0], [existing[ei][0]])
         linked += 1
     return superseded, refused, linked
